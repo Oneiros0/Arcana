@@ -22,7 +22,7 @@ let ws = fs.createWriteStream('staticContent.tsx');
 
 function createArray () {
     return new Promise((resolve, reject) => {
-        fs.readFile(__dirname + '/rawdata/1_10_2018' + '.tsx', 'utf8', function (err, contents) {
+        fs.readFile(__dirname + '/rawdata/1_6_2018' + '.tsx', 'utf8', function (err, contents) {
             if (err) {
                 reject(err)
             } else {
@@ -34,8 +34,11 @@ function createArray () {
 
 createArray()
     .then(data => {
-        singleScrape(data[0])
+        while(data.length > 0){
+            let single = data.splice(0,1);
+            singleScrape(single)
             .then(listing => console.log(listing))
+        }
     })
     .catch(err => {
         console.error(err)
@@ -68,6 +71,21 @@ async function singleScrape(url) {
             null
         ).singleNodeValue.innerText;
         /*  */
-    browser.close();
-    return result;
-};
+        return {
+            appTitle,
+            companyName,
+            dateListed,
+            category
+        }
+    });
+    let urlData = {
+        id: url,
+        appName: result.appTitle,
+        companyName: result.companyName,
+        dateListed: result.dateListed,
+        category: result.category
+    }
+    await browser.close();
+    return urlData;
+}
+
