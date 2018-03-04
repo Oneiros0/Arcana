@@ -20,40 +20,54 @@ var category = "//div[@class='appx-detail-section appx-headline-details-categori
 
 let ws = fs.createWriteStream('staticContent.tsx');
 
-//Asynchronous Function
-fs.readFile(__dirname + '/rawdata/' + dateString + '.tsx', 'utf8', function (err, contents) {
-    urlArray = contents.replace(/"/g, '').replace('[', '').replace(']', '').split(',');
-    console.log(urlArray.length);
-    procArray = urlArray;
-    let obj = procArray[0];
-    console.log(obj);
-})
+function createArray () {
+    return new Promise((resolve, reject) => {
+        fs.readFile(__dirname + '/rawdata/1_10_2018' + '.tsx', 'utf8', function (err, contents) {
+            if (err) {
+                reject(err)
+            } else {
+                resolve(contents.replace(/"/g, '').replace('[', '').replace(']', '').split(','))
+            }
+        })
+    })
+}
 
-let scrape = async () => {
+createArray()
+    .then(data => {
+        singleScrape(data[0])
+            .then(listing => console.log(listing))
+    })
+    .catch(err => {
+        console.error(err)
+    })
+
+async function singleScrape(url) {
     const browser = await puppeteer.launch({headless: false});
-    const page = await browser.newPage();
-
-    await page.goto();
-    await page.click('#default > div > div > div > div > section > div:nth-child(2) > ol > li:nth-child(1) > article > div.image_container > a > img');
+    let page = await browser.newPage();
+    await page.goto(url, {
+        timeout: 0
+    });
     await page.waitFor(1000);
-
-    const result = await page.evaluate(() => {
+    let result = await page.evaluate(() => {
         let appTitle = document.querySelector('.appx-page-header-2_title').innerText;
         let companyName = document.querySelector('.appx-company-name').innerText;
-        let dateListed = document.evaluate("(//div[@class='appx-detail-section-first-listed']//p)[2]", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.innerText;
-        let category = document.evaluate("//div[@class='appx-detail-section appx-headline-details-categories']//a//strong", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.innerText;
-        
-        return {
-            title,
-            price
-        }
 
-    });
+        let dateListed = document.evaluate(
+            "(//div[@class='appx-detail-section-first-listed']//p)[2]",
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+        ).singleNodeValue.innerText;
 
+        let category = document.evaluate(
+            "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong",
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+        ).singleNodeValue.innerText;
+        /*  */
     browser.close();
     return result;
 };
-
-// scrape().then((value) => {
-//     console.log(value); // Success!
-// });
