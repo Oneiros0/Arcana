@@ -9,12 +9,12 @@ var correctxp = "//div//ul[@id='appx-table-results']//li";
 (async() => {
   const tilexp = '.appx-tile.appx-tile-app.tile-link-click';
   const url = 'https://appexchange.salesforce.com/appxStore?type=App';
-  const browser = await puppeteer.launch();
-  const page = await browser.newPage();
+  let browser = await puppeteer.launch({headless: true});
+  let page = await browser.newPage();
   await page.goto(url);
   await page.waitForSelector(tilexp);
 
-  for(let i = 0; i < 201; i++){
+  for(let i = 0; i < 275; i++){
     console.log("Iteration : " + i);
     await page.evaluate(() => {
         loadMoreListingsJS();
@@ -44,7 +44,6 @@ var correctxp = "//div//ul[@id='appx-table-results']//li";
     if (err) {return console.log(err)}
     console.log( 'URL List dumped and created!');
   });
-
   
   //console.log('Length :: ', linkNums);
   console.log(hrefcol.length);
@@ -52,5 +51,3 @@ var correctxp = "//div//ul[@id='appx-table-results']//li";
   console.log(JSON.stringify(hrefcol));
   //await browser.close();
 })();
-
-return
