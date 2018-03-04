@@ -68,20 +68,6 @@ async function singleScrape(url) {
             null
         ).singleNodeValue.innerText;
         /*  */
-        return {
-            appTitle,
-            companyName,
-            dateListed,
-            category
-        }
-    });
-    let urlData = {
-        id: url,
-        appName: result.appTitle,
-        companyName: result.companyName,
-        dateListed: result.dateListed,
-        category: result.category
-    }
-    await browser.close();
-    return urlData;
-}
+    browser.close();
+    return result;
+};
