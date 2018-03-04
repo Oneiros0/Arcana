@@ -20,45 +20,40 @@ var category = "//div[@class='appx-detail-section appx-headline-details-categori
 
 let ws = fs.createWriteStream('staticContent.tsx');
 
+//Asynchronous Function
 fs.readFile(__dirname + '/rawdata/' + dateString + '.tsx', 'utf8', function (err, contents) {
     urlArray = contents.replace(/"/g, '').replace('[', '').replace(']', '').split(',');
     console.log(urlArray.length);
     procArray = urlArray;
-    let obj = singleScrape(procArray[0]);
+    let obj = procArray[0];
     console.log(obj);
 })
 
-async function singleScrape(url) {
-    const browser = await puppeteer.launch();
-    let page = await browser.newPage();
-    await page.goto(url, {
-        timeout: 0
-    });
+let scrape = async () => {
+    const browser = await puppeteer.launch({headless: false});
+    const page = await browser.newPage();
+
+    await page.goto();
+    await page.click('#default > div > div > div > div > section > div:nth-child(2) > ol > li:nth-child(1) > article > div.image_container > a > img');
     await page.waitFor(1000);
-    let result = await page.evaluate(() => {
-        let appTitle = document.querySelector('.appx-page-header-root').innerText;
+
+    const result = await page.evaluate(() => {
+        let appTitle = document.querySelector('.appx-page-header-2_title').innerText;
         let companyName = document.querySelector('.appx-company-name').innerText;
         let dateListed = document.evaluate("(//div[@class='appx-detail-section-first-listed']//p)[2]", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.innerText;
         let category = document.evaluate("//div[@class='appx-detail-section appx-headline-details-categories']//a//strong", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.innerText;
-        /*  */
+        
         return {
-            appTitle,
-            companyName,
-            dateListed,
-            category
+            title,
+            price
         }
-    });
-    let urlData = {
-        id: url,
-        appName: result.appTitle,
-        companyName: result.companyName,
-        dateListed: result.dateListed,
-        category: result.category
-    }
-    await browser.close();
-    return urlData;
-}
 
-function hazzit(){
-    console.log(procArray[0]);
-}
+    });
+
+    browser.close();
+    return result;
+};
+
+// scrape().then((value) => {
+//     console.log(value); // Success!
+// });
