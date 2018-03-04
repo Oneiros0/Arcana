@@ -20,26 +20,53 @@ var category = "//div[@class='appx-detail-section appx-headline-details-categori
 
 let ws = fs.createWriteStream('staticContent.tsx');
 
-fs.readFile(__dirname + '/rawdata/' + dateString + '.tsx', 'utf8', function (err, contents) {
-    urlArray = contents.replace(/"/g, '').replace('[', '').replace(']', '').split(',');
-    console.log(urlArray.length);
-    procArray = urlArray;
-    let obj = singleScrape(procArray[0]);
-    console.log(obj);
-})
+function createArray () {
+    return new Promise((resolve, reject) => {
+        fs.readFile(__dirname + '/rawdata/1_10_2018' + '.tsx', 'utf8', function (err, contents) {
+            if (err) {
+                reject(err)
+            } else {
+                resolve(contents.replace(/"/g, '').replace('[', '').replace(']', '').split(','))
+            }
+        })
+    })
+}
+
+createArray()
+    .then(data => {
+        singleScrape(data[0])
+            .then(listing => console.log(listing))
+    })
+    .catch(err => {
+        console.error(err)
+    })
 
 async function singleScrape(url) {
-    const browser = await puppeteer.launch();
+    const browser = await puppeteer.launch({headless: false});
     let page = await browser.newPage();
     await page.goto(url, {
         timeout: 0
     });
     await page.waitFor(1000);
     let result = await page.evaluate(() => {
-        let appTitle = document.querySelector('.appx-page-header-root').innerText;
+        let appTitle = document.querySelector('.appx-page-header-2_title').innerText;
         let companyName = document.querySelector('.appx-company-name').innerText;
-        let dateListed = document.evaluate("(//div[@class='appx-detail-section-first-listed']//p)[2]", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.innerText;
-        let category = document.evaluate("//div[@class='appx-detail-section appx-headline-details-categories']//a//strong", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.innerText;
+
+        let dateListed = document.evaluate(
+            "(//div[@class='appx-detail-section-first-listed']//p)[2]",
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+        ).singleNodeValue.innerText;
+
+        let category = document.evaluate(
+            "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong",
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+        ).singleNodeValue.innerText;
         /*  */
         return {
             appTitle,
@@ -57,8 +84,4 @@ async function singleScrape(url) {
     }
     await browser.close();
     return urlData;
-}
-
-function hazzit(){
-    console.log(procArray[0]);
 }
