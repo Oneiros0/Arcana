@@ -34,9 +34,10 @@ function createArray () {
 
 createArray()
     .then(data => {
-        while(data.length > 0){
-            let single = data.splice(0,1);
-            singleScrape(single)
+        
+for (let i = 0; i < data.length; i++) {
+            let url = data[i];
+            singleScrape(url)
             .then(listing => console.log(listing))
         }
     })
@@ -78,6 +79,7 @@ async function singleScrape(url) {
             category
         }
     });
+    await page.waitForNavigation({ waitUntil: 'networkidle' });
     let urlData = {
         id: url,
         appName: result.appTitle,
