@@ -20,6 +20,78 @@ var category = "//div[@class='appx-detail-section appx-headline-details-categori
 
 let ws = fs.createWriteStream('staticContent.tsx');
 
+testbundle();
+
+async function testbundle() {
+    createArray()
+        .then(async data => {
+            //while (data.length > 0) {
+            subData = data.splice(0,100);
+            processBatch(subData, 10, procArray).then((processed)=>{
+                console.log("Result Set 1", processed);
+                console.log("Result Set 2", procArray);
+            });
+            console.log("After Promise All", );
+        })
+}
+
+function processBatch(masterList, batchSize, procArray){
+    return Promise.all(masterList.splice(0, batchSize).map(async url => {
+        console.log("In Promise All");
+        return singleScrape(url) //.then(listing => console.log(listing));
+    })).then((results) => {
+        if (masterList.length <= batchSize) {
+            console.log('done');
+            procArray.push(results);
+            return procArray;
+        } else {
+            console.log('more');
+            procArray.push(results);
+            return processBatch(masterList, batchSize, procArray);
+        }
+    })
+}
+
+async function singleScrape(url) {
+    let browser = await puppeteer.launch({
+        headless: true
+    });
+    let page = await browser.newPage();
+    await page.goto(url, {
+        timeout: 0
+    });
+
+    await page.waitFor(1000);
+    let result = await page.evaluate(() => {
+
+        let appTitle = document.querySelector('.appx-page-header-2_title');
+        appTitle = appTitle ? appTitle.innerText : '';
+        let companyName = document.querySelector('.appx-company-name');
+        companyName = companyName ? companyName.innerText : '';
+        let dateListed = document.querySelector('.appx-detail-section-first-listed p:nth-child(2)');
+        dateListed = dateListed ? dateListed.innerText : '';
+        let category = document.querySelector('.appx-detail-section:nth-child(3) a strong');
+        category = category ? category.innerText : '';
+
+        return {
+            appTitle,
+            companyName,
+            dateListed,
+            category
+        }
+    });
+
+    let urlData = {
+        id: url,
+        appName: result.appTitle,
+        companyName: result.companyName,
+        dateListed: result.dateListed,
+        category: result.category
+    }
+    await browser.close();
+    return urlData;
+}
+
 function createArray() {
     return new Promise((resolve, reject) => {
         fs.readFile(__dirname + '/rawdata/1_6_2018' + '.tsx', 'utf8', function (err, contents) {
@@ -32,75 +104,38 @@ function createArray() {
     })
 }
 
-createArray()
-        .then(data => {
-                singleScrape(data[0])
-                    .then(listing => console.log(listing));
-        })
-        .catch(err => {
-            console.error(err)
-})
+//Old code for references
 
+// async function sampleTimeout() {
+//     setTimeout(() => {
+//         return
+//     }, 1000);
+// }
 
-async function singleScrape(url) {
-    let browser = await puppeteer.launch({
-        headless: false
-    });
-    let page = await browser.newPage();
-    await page.goto(url, {
-        timeout: 0
-    });
-    await page.waitFor(1000);
-    let result = await page.evaluate(() => {
-        let appTitle = document.querySelector('.appx-page-header-2_title').innerText;
-        let companyName = document.querySelector('.appx-company-name').innerText;
+// async function recursive(list, currIndex) {
+//     await sampleTimeout();
+//     if (currIndex < list.length) {
+//         singleScrape(list[currIndex])
+//             .then(listing => console.log(listing));
+//         recursive(list, currIndex++);
+//     } else {
+//         return
+//     }
+// }
 
-        let dateListed = document.evaluate(
-            "(//div[@class='appx-detail-section-first-listed']//p)[2]",
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null
-        ).singleNodeValue.innerText;
-
-        let category = document.evaluate(
-            "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong",
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null
-        ).singleNodeValue.innerText;
+   //
+        // let dateListed = document.evaluate(
+        //     "(//div[@class='appx-detail-section-first-listed']//p)[2]",
+        //     document,
+        //     null,
+        //     XPathResult.FIRST_ORDERED_NODE_TYPE,
+        //     null
+        // ).singleNodeValue.innerText;
+        // let category = document.evaluate(
+        //     "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong",
+        //     document,
+        //     null,
+        //     XPathResult.FIRST_ORDERED_NODE_TYPE,
+        //     null
+        // ).singleNodeValue.innerText;
         /*  */
-        return {
-            appTitle,
-            companyName,
-            dateListed,
-            category
-        }
-    });
-    
-    let urlData = {
-        id: url,
-        appName: result.appTitle,
-        companyName: result.companyName,
-        dateListed: result.dateListed,
-        category: result.category
-    }
-    await browser.close();
-    return urlData;
-}
-
-async function sampleTimeout(){
-    setTimeout(() => {return},1000);
-}
-
-async function recursive(list, currIndex){
-    await sampleTimeout();
-    if(currIndex < list.length){
-        singleScrape(list[currIndex])
-                .then(listing => console.log(listing));
-        recursive(list, currIndex++);
-    }else{
-        return
-    }
-}
