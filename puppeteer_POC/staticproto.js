@@ -20,7 +20,7 @@ var category = "//div[@class='appx-detail-section appx-headline-details-categori
 
 let ws = fs.createWriteStream('staticContent.tsx');
 
-function createArray () {
+function createArray() {
     return new Promise((resolve, reject) => {
         fs.readFile(__dirname + '/rawdata/1_6_2018' + '.tsx', 'utf8', function (err, contents) {
             if (err) {
@@ -33,20 +33,19 @@ function createArray () {
 }
 
 createArray()
-    .then(data => {
-        
-for (let i = 0; i < data.length; i++) {
-            let url = data[i];
-            singleScrape(url)
-            .then(listing => console.log(listing))
-        }
-    })
-    .catch(err => {
-        console.error(err)
-    })
+        .then(data => {
+                singleScrape(data[0])
+                    .then(listing => console.log(listing));
+        })
+        .catch(err => {
+            console.error(err)
+})
+
 
 async function singleScrape(url) {
-    const browser = await puppeteer.launch({headless: false});
+    let browser = await puppeteer.launch({
+        headless: false
+    });
     let page = await browser.newPage();
     await page.goto(url, {
         timeout: 0
@@ -79,7 +78,7 @@ async function singleScrape(url) {
             category
         }
     });
-    await page.waitForNavigation({ waitUntil: 'networkidle' });
+    
     let urlData = {
         id: url,
         appName: result.appTitle,
@@ -91,3 +90,17 @@ async function singleScrape(url) {
     return urlData;
 }
 
+async function sampleTimeout(){
+    setTimeout(() => {return},1000);
+}
+
+async function recursive(list, currIndex){
+    await sampleTimeout();
+    if(currIndex < list.length){
+        singleScrape(list[currIndex])
+                .then(listing => console.log(listing));
+        recursive(list, currIndex++);
+    }else{
+        return
+    }
+}
