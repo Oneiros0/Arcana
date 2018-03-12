@@ -18,5 +18,11 @@
   "homepage": "https://github.com/ElementCR/scrapula#readme",
   "devDependencies": {
     "puppeteer": "^1.1.1"
+  },
+  "dependencies": {
+    "body-parser": "^1.18.2",
+    "express": "^4.16.2",
+    "mongodb": "^3.0.4",
+    "mongoose": "^5.0.9"
   }
 }
