@@ -27,18 +27,30 @@ var urlData = {
     numOfRating: ''
 }
 
-let ws = fs.createWriteStream(__dirname + '/rankdata/' + dateString + '_rankings.tsx');
+let ws = fs.createWriteStream(__dirname + '/rankdata/' + dateString + '_rankings.txt');
 
-fs.readFile(__dirname + '/rawdata/' + dateString + '.tsx', 'utf8', function (err, contents) {
-    urlArray = contents.replace(/"/g,'').replace('[', '').replace(']', '').split(',');
-    console.log(urlArray.length);
+function createArray() {
+    return new Promise((resolve, reject) => {
+        fs.readFile(__dirname + '/rawdata/' + dateString + '.txt', 'utf8', function (err, contents) {
+            if (err) {
+                reject(err)
+            } else {
+                resolve(contents.replace(/"/g, '').replace('[', '').replace(']', '').split(','))
+            }
+        })
+    })
+}
+
+createArray().then(results => {
     for(var i = 0; i < 3000; i++){
         if(i != 2999){
-            ws.write(`{id: '${urlArray[i]}', position: '${i}'}, \n`);        
+            procArray.push(`{id: '${results[i]}', position: '${i}'},`);        
         }else{
-            ws.write(`{id: '${urlArray[i]}', position: '${i}'} \n`);
+            procArray.push(`{id: '${results[i]}', position: '${i}'}`);
         }
     }
+    console.log(procArray);
+    ws.write(JSON.stringify(procArray));
 });
 
 return
