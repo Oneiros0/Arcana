@@ -12,7 +12,7 @@ var newSize = 0;
   const tilexp = '.appx-tile.appx-tile-app.tile-link-click';
   const url = 'https://appexchange.salesforce.com/appxStore?type=App';
   let browser = await puppeteer.launch({
-    headless: false
+    headless: true
   });
   let page = await browser.newPage();
   await page.goto(url);

@@ -4,7 +4,7 @@ var url = "mongodb://localhost:27017/";
 MongoClient.connect(url, function(err, db) {
   if (err) throw err;
   var dbo = db.db("arcana");
-  dbo.createCollection("constants", function(err, res) {
+  dbo.createCollection("companies", function(err, res) {
     if (err) throw err;
     console.log("Collection created!");
     db.close();
