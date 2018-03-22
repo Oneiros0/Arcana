@@ -15,6 +15,10 @@ var ratingsTabXPath = "//li[@title='Reviews']//a";
 var ratingCountClass = "appx-rating-amount";
 var ratingValueClass = "appx-average-rating-numeral";
 
+var obj = {
+    table: []
+ };
+
 //TODO: Research how to find the element via tagName.
 var categoryClass = "strong";
 
@@ -27,7 +31,7 @@ var urlData = {
     numOfRating: ''
 }
 
-let ws = fs.createWriteStream(__dirname + '/rankdata/' + dateString + '_rankings.txt');
+let ws = fs.createWriteStream(__dirname + '/rankdata/' + dateString + '_rankings.json',);
 
 function createArray() {
     return new Promise((resolve, reject) => {
@@ -35,22 +39,31 @@ function createArray() {
             if (err) {
                 reject(err)
             } else {
-                resolve(contents.replace(/"/g, '').replace('[', '').replace(']', '').split(','))
+                let jsonData = JSON.parse(contents);
+                resolve(jsonData);
             }
         })
     })
 }
 
-createArray().then(results => {
-    for(var i = 0; i < 3000; i++){
-        if(i != 2999){
-            procArray.push(`{id: '${results[i]}', position: '${i}'},`);        
-        }else{
-            procArray.push(`{id: '${results[i]}', position: '${i}'}`);
-        }
-    }
-    console.log(procArray);
-    ws.write(JSON.stringify(procArray));
+createArray().then(payload => {
+    let counter = 0;
+    payload.forEach(item => {
+        let id = item.substring(item.indexOf('=')+1);
+        console.log(id);
+        obj.table.push(`{id: ${id}, position: "${counter}", timestamp: "${dateString}"}`);
+        counter++;
+    });
+    
+    let strArr = JSON.stringify(obj);
+    ws.write(strArr);
+
+    // procArray.forEach(item => {
+    //     ws.write(JSON.stringify(obj) + '\n');
+    // });
+    
+    //console.log(procArray);
+//    ws.write(JSON.stringify(procArray));
 });
 
 return

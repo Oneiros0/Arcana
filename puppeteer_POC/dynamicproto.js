@@ -18,7 +18,7 @@ var ratingCountClass = "appx-rating-amount";
 var ratingValueClass = "appx-average-rating-numeral";
 var category = "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong";
 
-let ws = fs.createWriteStream(dateString + 'staticList.txt');
+let ws = fs.createWriteStream('/dynamics/' + dateString + 'dynamicList.json');
 
 testbundle();
 

@@ -18,9 +18,13 @@ var ratingCountClass = "appx-rating-amount";
 var ratingValueClass = "appx-average-rating-numeral";
 var category = "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong";
 
-let ws = fs.createWriteStream(dateString + 'staticList.txt');
+let ws = fs.createWriteStream(__dirname + '/constants/' + dateString + '_const.json');
 
 testbundle();
+
+// function staticArcana(){
+    
+// }
 
 async function testbundle() {
     createArray()
@@ -59,6 +63,7 @@ function processBatch(masterList, batchSize, procArray){
 }
 
 async function singleScrape(url) {
+    let bbyid = url.substring(url.indexOf('=')+1);
     let browser = await puppeteer.launch({
         headless: true
     });
@@ -69,7 +74,6 @@ async function singleScrape(url) {
 
     await page.waitFor(1000);
     let result = await page.evaluate(() => {
-
         let appTitle = document.querySelector('.appx-page-header-2_title');
         appTitle = appTitle ? appTitle.innerText : '';
         let companyName = document.querySelector('.appx-company-name');
@@ -88,7 +92,7 @@ async function singleScrape(url) {
     });
 
     let urlData = {
-        id: url,
+        id: bbyid,
         appName: result.appTitle,
         companyName: result.companyName,
         dateListed: result.dateListed,
