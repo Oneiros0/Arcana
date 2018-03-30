@@ -20,13 +20,13 @@ var category = "//div[@class='appx-detail-section appx-headline-details-categori
 
 let ws = fs.createWriteStream(__dirname + '/constants/' + dateString + '_const.json');
 
-testbundle();
+bundle();
 
 // function staticArcana(){
     
 // }
 
-async function testbundle() {
+async function bundle() {
     createArray()
         .then(async data => {
             //while (data.length > 0) {
@@ -55,7 +55,7 @@ function processBatch(masterList, batchSize, procArray){
             procArray.push(results);
             return procArray;
         } else {
-            console.log('more');
+            console.log('MasterList Size :: ' + masterList.length);
             procArray.push(results);
             return processBatch(masterList, batchSize, procArray);
         }

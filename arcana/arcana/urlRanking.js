@@ -6,14 +6,6 @@ var dateString = (d1.getMonth() + '_' + d1.getDate() + '_' + d1.getFullYear());
 var fs = require('fs');
 var urlArray = [];
 var procArray = [];
-var appNameClass = "appx-page-header-root";
-var companyNameClass = "appx-company-name";
-var listedXPATH = "(//div[@class='appx-detail-section-first-listed']//p)[2]";
-var lastReleaseXPATH = "(//span[@class='appx-detail-section-last-update']//p)[2]";
-var overviewTabXPATH = "//li[@title='Overview']//a"
-var ratingsTabXPath = "//li[@title='Reviews']//a";
-var ratingCountClass = "appx-rating-amount";
-var ratingValueClass = "appx-average-rating-numeral";
 
 var obj = {
     table: []
