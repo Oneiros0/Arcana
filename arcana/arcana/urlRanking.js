@@ -23,7 +23,7 @@ var urlData = {
     numOfRating: ''
 }
 
-let ws = fs.createWriteStream(__dirname + '/rankdata/' + dateString + '_rankings.json',);
+let ws = fs.createWriteStream('../' + __dirname + '/rankdata/' + dateString + '_rankings.json',);
 
 function createArray() {
     return new Promise((resolve, reject) => {
@@ -49,13 +49,5 @@ createArray().then(payload => {
     
     let strArr = JSON.stringify(obj);
     ws.write(strArr);
-
-    // procArray.forEach(item => {
-    //     ws.write(JSON.stringify(obj) + '\n');
-    // });
-    
-    //console.log(procArray);
-//    ws.write(JSON.stringify(procArray));
+    process.exit();
 });
-
-return

@@ -8,6 +8,9 @@ var correctxp = "//div//ul[@id='appx-table-results']//li";
 var listSize = 0;
 var gauge = 0;
 var newSize = 0;
+
+console.log(__dirname + '/../rawdata/' + dateString + '.txt');
+
 (async () => {
   const tilexp = '.appx-tile.appx-tile-app.tile-link-click';
   const url = 'https://appexchange.salesforce.com/appxStore?type=App';
@@ -75,11 +78,12 @@ var newSize = 0;
     return linkArray.map(link => link.href);
   });
 
-  fs.writeFile(__dirname + '/rawdata/' + dateString + '.txt', JSON.stringify(hrefcol), (err) => {
+  fs.writeFile(__dirname + '/../rawdata/' + dateString + '.txt', JSON.stringify(hrefcol), (err) => {
     if (err) {
       return console.log(err)
     }
     console.log('URL List dumped and created!');
+    process.exit();
   });
 
   //console.log('Length :: ', linkNums);
