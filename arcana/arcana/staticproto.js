@@ -17,22 +17,24 @@ var ratingsTabXPath = "//li[@title='Reviews']//a";
 var ratingCountClass = "appx-rating-amount";
 var ratingValueClass = "appx-average-rating-numeral";
 var category = "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong";
+var filedirectory = __dirname + "'/rawdata/'"+ dateString + "'.txt, 'utf8'";
 
+console.log(filedirectory);
+console.log(__dirname + '/constants/' + dateString + '_const.json');
 let ws = fs.createWriteStream(__dirname + '/constants/' + dateString + '_const.json');
 
-bundle();
+bundle(filedirectory);
 
 // function staticArcana(){
     
 // }
 
-async function bundle() {
-    createArray()
+async function bundle(filedirectory) {
+    createArray(filedirectory)
         .then(async data => {
             //while (data.length > 0) {
             subData = data.splice(0,data.length);
             processBatch(subData, 10, procArray).then((processed)=>{
-                console.log("Result Set 2", procArray.length);
                 for(let i = 0; i < procArray.length; i++){
                     for(let j = 0; j < procArray[i].length; j++){
                        results.push(procArray[i][j]);
@@ -47,7 +49,6 @@ async function bundle() {
 
 function processBatch(masterList, batchSize, procArray){
     return Promise.all(masterList.splice(0, batchSize).map(async url => {
-        console.log("In Promise All");
         return singleScrape(url) //.then(listing => console.log(listing));
     })).then((results) => {
         if (masterList.length < batchSize) {
@@ -102,9 +103,9 @@ async function singleScrape(url) {
     return urlData;
 }
 
-function createArray() {
+function createArray(filedirectory){
     return new Promise((resolve, reject) => {
-        fs.readFile(__dirname + '/rawdata/' + dateString + '.txt', 'utf8', function (err, contents) {
+        fs.readFile(filedirectory, function (err, contents) {
             if (err) {
                 reject(err)
             } else {
@@ -114,38 +115,6 @@ function createArray() {
     })
 }
 
-//Old code for references
-
-// async function sampleTimeout() {
-//     setTimeout(() => {
-//         return
-//     }, 1000);
-// }
-
-// async function recursive(list, currIndex) {
-//     await sampleTimeout();
-//     if (currIndex < list.length) {
-//         singleScrape(list[currIndex])
-//             .then(listing => console.log(listing));
-//         recursive(list, currIndex++);
-//     } else {
-//         return
-//     }
-// }
-
-   //
-        // let dateListed = document.evaluate(
-        //     "(//div[@class='appx-detail-section-first-listed']//p)[2]",
-        //     document,
-        //     null,
-        //     XPathResult.FIRST_ORDERED_NODE_TYPE,
-        //     null
-        // ).singleNodeValue.innerText;
-        // let category = document.evaluate(
-        //     "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong",
-        //     document,
-        //     null,
-        //     XPathResult.FIRST_ORDERED_NODE_TYPE,
-        //     null
-        // ).singleNodeValue.innerText;
-        /*  */
+module.exports = {
+    bundle: bundle()
+  };
