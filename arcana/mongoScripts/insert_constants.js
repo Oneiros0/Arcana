@@ -3,11 +3,13 @@ var fs = require('fs');
 
 var url = "mongodb://localhost:27017/";
 
+var d1 = new Date();
+var dateString = (d1.getMonth() + '_' + d1.getDate() + '_' + d1.getFullYear());
 var constArr = new Array();
 
 function createArray() {
     return new Promise((resolve, reject) => {
-        fs.readFile(__dirname + '/constants/staticList.json', 'utf8', function (err, contents) {
+        fs.readFile(__dirname + '/../constants/'+ dateString + '_const.json', 'utf8', function (err, contents) {
             if (err) {
                 reject(err)
             } else {

@@ -18,17 +18,22 @@ var ratingCountClass = "appx-rating-amount";
 var ratingValueClass = "appx-average-rating-numeral";
 var category = "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong";
 
-let ws = fs.createWriteStream('/dynamics/' + dateString + 'dynamicList.json');
+var readfiledirectory = __dirname + '/../rawdata/'+ dateString + '.txt';
+var writefiledirectory = __dirname + '/../constants/' + dateString + '_const.json'
 
-testbundle();
+console.log('>>>>>', readfiledirectory);
+//console.log(writefiledirectory);
 
-async function testbundle() {
-    createArray()
+let ws = fs.createWriteStream(writefiledirectory);
+
+bundle(readfiledirectory);
+
+function bundle(readfiledirectory) {
+    console.log(readfiledirectory, ' >>>>>>>>>>In the Bundle Context');
+    createArray(readfiledirectory)
         .then(async data => {
-            //while (data.length > 0) {
             subData = data.splice(0,data.length);
             processBatch(subData, 10, procArray).then((processed)=>{
-                console.log("Result Set 2", procArray.length);
                 for(let i = 0; i < procArray.length; i++){
                     for(let j = 0; j < procArray[i].length; j++){
                        results.push(procArray[i][j]);
@@ -43,7 +48,6 @@ async function testbundle() {
 
 function processBatch(masterList, batchSize, procArray){
     return Promise.all(masterList.splice(0, batchSize).map(async url => {
-        console.log("In Promise All");
         return singleScrape(url) //.then(listing => console.log(listing));
     })).then((results) => {
         if (masterList.length < batchSize) {
@@ -51,7 +55,7 @@ function processBatch(masterList, batchSize, procArray){
             procArray.push(results);
             return procArray;
         } else {
-            console.log('more');
+            console.log('MasterList Size :: ' + masterList.length);
             procArray.push(results);
             return processBatch(masterList, batchSize, procArray);
         }
@@ -59,6 +63,7 @@ function processBatch(masterList, batchSize, procArray){
 }
 
 async function singleScrape(url) {
+    let bbyid = url.substring(url.indexOf('=')+1);
     let browser = await puppeteer.launch({
         headless: true
     });
@@ -69,7 +74,6 @@ async function singleScrape(url) {
 
     await page.waitFor(1000);
     let result = await page.evaluate(() => {
-
         let appTitle = document.querySelector('.appx-page-header-2_title');
         appTitle = appTitle ? appTitle.innerText : '';
         let companyName = document.querySelector('.appx-company-name');
@@ -78,29 +82,34 @@ async function singleScrape(url) {
         dateListed = dateListed ? dateListed.innerText : '';
         let category = document.querySelector('.appx-detail-section:nth-child(3) a strong');
         category = category ? category.innerText : '';
+        let domain =  document.querySelector('div.appx-extended-detail-subsection-description.slds-truncate > a');
+        domain = domain ? domain.innerText : '';
 
         return {
             appTitle,
             companyName,
             dateListed,
-            category
+            category,
+            domain
         }
     });
 
     let urlData = {
-        id: url,
+        id: bbyid,
         appName: result.appTitle,
         companyName: result.companyName,
         dateListed: result.dateListed,
-        category: result.category
+        category: result.category,
+        domain: result.domain
     }
     await browser.close();
     return urlData;
 }
 
-function createArray() {
+function createArray(readfiledirectory){
     return new Promise((resolve, reject) => {
-        fs.readFile(__dirname + '/rawdata/' + dateString + '.txt', 'utf8', function (err, contents) {
+        console.log(readfiledirectory, ' In the creat Array Context');
+        fs.readFile(readfiledirectory, 'utf8', function (err, contents) {
             if (err) {
                 reject(err)
             } else {
@@ -110,38 +119,6 @@ function createArray() {
     })
 }
 
-//Old code for references
-
-// async function sampleTimeout() {
-//     setTimeout(() => {
-//         return
-//     }, 1000);
-// }
-
-// async function recursive(list, currIndex) {
-//     await sampleTimeout();
-//     if (currIndex < list.length) {
-//         singleScrape(list[currIndex])
-//             .then(listing => console.log(listing));
-//         recursive(list, currIndex++);
-//     } else {
-//         return
-//     }
-// }
-
-   //
-        // let dateListed = document.evaluate(
-        //     "(//div[@class='appx-detail-section-first-listed']//p)[2]",
-        //     document,
-        //     null,
-        //     XPathResult.FIRST_ORDERED_NODE_TYPE,
-        //     null
-        // ).singleNodeValue.innerText;
-        // let category = document.evaluate(
-        //     "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong",
-        //     document,
-        //     null,
-        //     XPathResult.FIRST_ORDERED_NODE_TYPE,
-        //     null
-        // ).singleNodeValue.innerText;
-        /*  */
+module.exports = {
+    bundle: bundle
+  };

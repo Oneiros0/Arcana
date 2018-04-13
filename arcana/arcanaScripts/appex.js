@@ -9,8 +9,6 @@ var listSize = 0;
 var gauge = 0;
 var newSize = 0;
 
-console.log(__dirname + '/../rawdata/' + dateString + '.txt');
-
 (async () => {
   const tilexp = '.appx-tile.appx-tile-app.tile-link-click';
   const url = 'https://appexchange.salesforce.com/appxStore?type=App';
