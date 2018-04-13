@@ -7,6 +7,9 @@ var fs = require('fs');
 var urlArray = [];
 var procArray = [];
 
+var readfiledirectory = __dirname + '/../rawdata/' + dateString + '.txt';
+var writefiledirectory = __dirname + '/../rankdata/' + dateString + '_rankings.json';
+
 var obj = {
     table: []
  };
@@ -23,11 +26,11 @@ var urlData = {
     numOfRating: ''
 }
 
-let ws = fs.createWriteStream('../' + __dirname + '/rankdata/' + dateString + '_rankings.json',);
+let ws = fs.createWriteStream(writefiledirectory, 'utf8');
 
 function createArray() {
     return new Promise((resolve, reject) => {
-        fs.readFile(__dirname + '/rawdata/' + dateString + '.txt', 'utf8', function (err, contents) {
+        fs.readFile(readfiledirectory, 'utf8', function (err, contents) {
             if (err) {
                 reject(err)
             } else {

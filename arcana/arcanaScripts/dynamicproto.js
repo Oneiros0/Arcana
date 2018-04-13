@@ -8,32 +8,22 @@ var urlArray = [];
 var procArray = new Array();
 let results = new Array();
 let promiseArray = new Array();
-var appNameClass = ".appx-page-header-root";
-var companyNameClass = "appx-company-name";
-var listedXPATH = "(//div[@class='appx-detail-section-first-listed']//p)[2]";
-var lastReleaseXPATH = "(//span[@class='appx-detail-section-last-update']//p)[2]";
-var overviewTabXPATH = "//li[@title='Overview']//a"
-var ratingsTabXPath = "//li[@title='Reviews']//a";
-var ratingCountClass = "appx-rating-amount";
-var ratingValueClass = "appx-average-rating-numeral";
-var category = "//div[@class='appx-detail-section appx-headline-details-categories']//a//strong";
-var filedirectory = __dirname + "'/rawdata/'"+ dateString + "'.txt, 'utf8'";
 
-console.log(filedirectory);
-console.log(__dirname + '/constants/' + dateString + '_const.json');
-let ws = fs.createWriteStream(__dirname + '/constants/' + dateString + '_const.json');
+var readfiledirectory = __dirname + '/../rawdata/'+ dateString + '.txt';
+var writefiledirectory = __dirname + '/../constants/' + dateString + '_const.json'
 
-bundle(filedirectory);
+console.log('>>>>>', readfiledirectory);
+//console.log(writefiledirectory);
 
-// function staticArcana(){
-    
-// }
+let ws = fs.createWriteStream(writefiledirectory);
 
-async function bundle(filedirectory) {
-    createArray(filedirectory)
+bundle(readfiledirectory);
+
+function bundle(readfiledirectory) {
+    console.log(readfiledirectory, ' >>>>>>>>>>In the Bundle Context');
+    createArray(readfiledirectory)
         .then(async data => {
-            //while (data.length > 0) {
-            subData = data.splice(0,data.length);
+            subData = data.splice(0,10);
             processBatch(subData, 10, procArray).then((processed)=>{
                 for(let i = 0; i < procArray.length; i++){
                     for(let j = 0; j < procArray[i].length; j++){
@@ -83,12 +73,15 @@ async function singleScrape(url) {
         dateListed = dateListed ? dateListed.innerText : '';
         let category = document.querySelector('.appx-detail-section:nth-child(3) a strong');
         category = category ? category.innerText : '';
+        let domain =  document.querySelector('div.appx-extended-detail-subsection-description.slds-truncate > a');
+        domain = domain ? domain.innerText : '';
 
         return {
             appTitle,
             companyName,
             dateListed,
-            category
+            category,
+            domain
         }
     });
 
@@ -97,15 +90,17 @@ async function singleScrape(url) {
         appName: result.appTitle,
         companyName: result.companyName,
         dateListed: result.dateListed,
-        category: result.category
+        category: result.category,
+        domain: result.domain
     }
     await browser.close();
     return urlData;
 }
 
-function createArray(filedirectory){
+function createArray(readfiledirectory){
     return new Promise((resolve, reject) => {
-        fs.readFile(filedirectory, function (err, contents) {
+        console.log(readfiledirectory, ' In the creat Array Context');
+        fs.readFile(readfiledirectory, 'utf8', function (err, contents) {
             if (err) {
                 reject(err)
             } else {
@@ -114,7 +109,3 @@ function createArray(filedirectory){
         })
     })
 }
-
-module.exports = {
-    bundle: bundle()
-  };

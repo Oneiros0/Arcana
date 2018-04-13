@@ -1,11 +1,11 @@
 var MongoClient = require('mongodb').MongoClient;
 var url = "mongodb://localhost:27017/";
 
-var obj = {
-    table: []
+var company = {
+    companyName:'',
+    domainName:'',
+    categories:[]
 };
-
-var uniqueCompanies = [];
 
 var companyArray = {
     companies: []
@@ -23,37 +23,21 @@ MongoClient.connect(url, function (err, db) {
 
     dbo.collection("constants").find(query).toArray(function (err, result) {
         if (err) throw err;
+        console.log(result.length);
         result.forEach(app => {
-            companyName = app.companyName;
-            obj.table.push(companyName);
+            let company = {
+                companyName: app.companyName,
+                domainName: app.domain,
+                categories: app.category
+            }
+            console.log(company);
         });
 
-        uniqueCompanies = obj.table.filter(function(item, pos, self) {
-            return self.indexOf(item) == pos;
-        })
+        // dbo.collection("companies").insertMany(companyArray.companies, function(err, res) {
+        //     if (err) throw err;
+        //     console.log("Number of documents inserted: " + res.insertedCount);
+        // });
 
-        uniqueCompanies.forEach(company => {
-            let compObj = {
-                companyName:"",
-                categories:[],
-                size:"",
-                marketCapital:0,
-                internalPoc:"",
-                externalPoc:"",
-                appTotal:0,
-                reviewsTotal:0,
-                ratingAvg:0
-            };
-            compObj.companyName = company;
-            companyArray.companies.push(compObj);
-        });
-
-        dbo.collection("companies").insertMany(companyArray.companies, function(err, res) {
-            if (err) throw err;
-            console.log("Number of documents inserted: " + res.insertedCount);
-        });
-
-        console.log(companyArray);
         db.close();
     });
 
