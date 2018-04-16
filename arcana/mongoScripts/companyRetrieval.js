@@ -30,7 +30,7 @@ MongoClient.connect(url, function (err, db) {
                 domainName: app.domain,
                 categories: app.category
             }
-            console.log(company);
+            
         });
 
         // dbo.collection("companies").insertMany(companyArray.companies, function(err, res) {

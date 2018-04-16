@@ -3,4 +3,3 @@ db.constants.aggregate([
   { $group: { _id:"$companyName", domain:{$first:"$domain"}, appsTotal: { $sum: 1 }, categories:{$addToSet:"$category"}}},
   {$sort:{appsTotal:-1}}]);
 
-
