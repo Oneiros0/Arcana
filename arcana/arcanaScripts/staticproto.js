@@ -29,7 +29,6 @@ let ws = fs.createWriteStream(writefiledirectory);
 bundle(readfiledirectory);
 
 function bundle(readfiledirectory) {
-    console.log(readfiledirectory, ' >>>>>>>>>>In the Bundle Context');
     createArray(readfiledirectory)
         .then(async data => {
             subData = data.splice(0,data.length);

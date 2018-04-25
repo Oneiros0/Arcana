@@ -68,12 +68,25 @@ async function singleScrape(url) {
         let companyName = document.querySelector('.appx-company-name');
         companyName = companyName ? companyName.innerText : '';
 
+        let dateListed = document.querySelector('.appx-detail-section-first-listed p:nth-child(2)');
+        dateListed = dateListed ? dateListed.innerText : '';
+        
         let lastUpdate = document.querySelector('.appx-detail-section-last-update p:nth-child(2)');
         lastUpdate = lastUpdate ? lastUpdate.innerText : '';
+
+        let category = document.querySelector('.appx-detail-section:nth-child(3) a strong');
+        category = category ? category.innerText : '';
+
+        let domain =  document.querySelector('div.appx-extended-detail-subsection-description.slds-truncate > a');
+        domain = domain ? domain.innerText : '';
+
         return {
             appTitle,
             companyName,
+            dateListed,
             lastUpdate,
+            category,
+            domain
         }
     });
 
@@ -144,13 +157,13 @@ async function singleScrape(url) {
         id: bbyid,
         appName: result1.appTitle,
         companyName: result1.companyName,
+        dateListed: result1.dateListed,
         lastUpdate: result1.lastUpdate,
+        category: result1.category,
+        domain: result1.domain,
         price: result2.price,
-        percentages: result2.percentages,
-        actuals: result2.actuals,
         totalReviews: result2.totalReviews,
         overallRating: result2.overallRating,
-        date: dateString
     }
     await browser.close();
     return urlData;
