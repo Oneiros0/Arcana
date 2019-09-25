@@ -19,6 +19,7 @@ bundle(readfiledirectory);
 function bundle(readfiledirectory) {
     createArray(readfiledirectory)
         .then(async data => {
+            console.log("DATA LENGTH : " + data.length);
             subData = data.splice(0, data.length);
             processBatch(subData, 10, procArray).then((processed) => {
                 for (let i = 0; i < procArray.length; i++) {
