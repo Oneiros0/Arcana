@@ -8,6 +8,7 @@ var urlArray = [];
 var procArray = new Array();
 let results = new Array();
 let promiseArray = new Array();
+let anchor = 'div.appx-write-review-text div';
 
 var readfiledirectory = __dirname + '/../rawdata/' + dateString + '.txt';
 var writefiledirectory = __dirname + '/../dynamic/' + dateString + '_dynamic.json'
@@ -82,8 +83,10 @@ async function singleScrape(url) {
         // page.evaluate(() => {
         //     var button = document.getElementById('tab-default-2__item');
         // }),
+
         page.click("a[id=tab-default-2__item]"),
-        page.waitFor(15000)
+        page.waitFor(7000)
+        // page.waitForSelector("div.appx-write-review-text div")
     ]);
 
     let result2 = await page.evaluate(() => {
@@ -165,6 +168,7 @@ function createArray(readfiledirectory) {
             } else {
                 resolve(contents.replace(/"/g, '').replace('[', '').replace(']', '').split(','))
             }
+
         })
     })
 }

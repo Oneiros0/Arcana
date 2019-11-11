@@ -30,7 +30,7 @@ let ws = fs.createWriteStream(writefiledirectory, 'utf8');
 
 function createArray() {
     return new Promise((resolve, reject) => {
-        fs.readFile(readfiledirectory, 'utf8', function (err, contents) {
+        fs.readFile(readfiledirectory, 'utf8', function(err, contents) {
             if (err) {
                 reject(err)
             } else {

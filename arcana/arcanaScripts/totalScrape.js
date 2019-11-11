@@ -10,7 +10,7 @@ let results = new Array();
 let promiseArray = new Array();
 
 var readfiledirectory = __dirname + '/../rawdata/' + dateString + '.txt';
-var writefiledirectory = __dirname + '/../dynamic/' + dateString + '_dynamic.json'
+var writefiledirectory = __dirname + '/../dynamic/' + dateString + '_dynamic_total.json'
 
 let ws = fs.createWriteStream(writefiledirectory);
 
@@ -95,7 +95,7 @@ async function singleScrape(url) {
         //     var button = document.getElementById('tab-default-2__item');
         // }),
         page.click("a[id=tab-default-2__item]"),
-        page.waitFor(15000)
+        page.waitFor(7000)
     ]);
 
     let result2 = await page.evaluate(() => {
