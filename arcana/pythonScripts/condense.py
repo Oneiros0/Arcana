@@ -1,13 +1,19 @@
 import json
+import requests
+import urllib.request
+import time
+from bs4 import BeautifulSoup
 
-items = []
-input_file = open('../dynamic/7_27_2019_dynamic.json')
-json_array = json.load(input_file)
+urls = list()
 
-# with open("data_file.json", "w") as write_file:
-#     json.dump(data, write_file)
-
-for item in json_array:
-    items.append(item)
-
-print(items)
+with open('../rawdata/10_1_2019.txt') as f:
+    json_object = json.load(f)
+    for item in json_object:
+        urls.append(item)
+print("Requesting: " + urls[0])
+try:
+    page = urllib.request.urlopen(urls[0])
+    soup = BeautifulSoup(page, 'html.parser')
+    print(soup)
+except:
+    print("An error occured.")
