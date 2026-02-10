@@ -93,7 +93,10 @@ class CoinbaseSource(DataSource):
         end: datetime | None = None,
         limit: int = DEFAULT_LIMIT,
     ) -> list[Trade]:
-        """Fetch trades for a pair within a time window.
+        """Fetch trades for a pair within a time window (single API call).
+
+        This may not return all trades if the window contains more than
+        `limit` trades. Use fetch_all_trades() for complete data.
 
         Args:
             pair: Trading pair, e.g. 'ETH-USD'.
@@ -119,6 +122,78 @@ class CoinbaseSource(DataSource):
         trades = [self._parse_trade(raw, pair) for raw in raw_trades]
         return sorted(trades, key=lambda t: t.timestamp)
 
+    def fetch_all_trades(
+        self,
+        pair: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[Trade]:
+        """Fetch ALL trades in a time window, paginating automatically.
+
+        Uses binary subdivision: if a single API call hits the per-request
+        limit (300 trades), the window is split in half and each half is
+        fetched recursively. This adapts to any traffic volume — busy
+        hours get subdivided into smaller windows until all trades fit.
+
+        Args:
+            pair: Trading pair, e.g. 'ETH-USD'.
+            start: Start of time window (UTC).
+            end: End of time window (UTC).
+
+        Returns:
+            Complete list of Trade objects in the range, ascending.
+        """
+        return self._fetch_with_subdivision(pair, start, end, depth=0)
+
+    def _fetch_with_subdivision(
+        self,
+        pair: str,
+        start: datetime,
+        end: datetime,
+        depth: int,
+    ) -> list[Trade]:
+        """Recursively subdivide time windows to fetch all trades."""
+        MAX_DEPTH = 10  # ~3.5s minimum window from 1-hour start
+
+        trades = self.fetch_trades(pair=pair, start=start, end=end)
+
+        if len(trades) < DEFAULT_LIMIT or depth >= MAX_DEPTH:
+            if depth >= MAX_DEPTH and len(trades) >= DEFAULT_LIMIT:
+                logger.warning(
+                    "Pagination depth limit reached for %s [%s → %s]: "
+                    "%d trades returned, some may be missing",
+                    pair,
+                    start.isoformat(),
+                    end.isoformat(),
+                    len(trades),
+                )
+            return trades
+
+        # Window is full — split in half and recurse
+        mid = start + (end - start) / 2
+        logger.debug(
+            "Subdividing window [%s → %s] at depth %d (got %d trades at limit)",
+            start.strftime("%H:%M:%S"),
+            end.strftime("%H:%M:%S"),
+            depth,
+            len(trades),
+        )
+
+        time_mod.sleep(RATE_LIMIT_DELAY)
+        left = self._fetch_with_subdivision(pair, start, mid, depth + 1)
+        time_mod.sleep(RATE_LIMIT_DELAY)
+        right = self._fetch_with_subdivision(pair, mid, end, depth + 1)
+
+        # Deduplicate by trade_id (boundary trades may appear in both halves)
+        seen: set[str] = set()
+        result: list[Trade] = []
+        for trade in left + right:
+            if trade.trade_id not in seen:
+                seen.add(trade.trade_id)
+                result.append(trade)
+
+        return sorted(result, key=lambda t: t.timestamp)
+
     def fetch_trades_window(
         self,
         pair: str,
@@ -129,14 +204,14 @@ class CoinbaseSource(DataSource):
         """Fetch all trades in a range by walking forward through time windows.
 
         This is the primary method for bulk backfill. It splits the range
-        into windows and fetches each one, yielding a complete set of trades.
+        into windows and fetches each one with full pagination, yielding
+        a complete set of trades.
 
         Args:
             pair: Trading pair, e.g. 'ETH-USD'.
             start: Backfill start time (UTC).
             end: Backfill end time (UTC).
-            window: Size of each time window to query. Smaller windows
-                    reduce the chance of hitting the per-request limit.
+            window: Size of each time window to query.
 
         Returns:
             List of all Trade objects in the range, ascending by timestamp.
@@ -149,7 +224,7 @@ class CoinbaseSource(DataSource):
         while current < end:
             window_end = min(current + window, end)
 
-            trades = self.fetch_trades(
+            trades = self.fetch_all_trades(
                 pair=pair,
                 start=current,
                 end=window_end,
