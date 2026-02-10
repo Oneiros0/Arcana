@@ -44,7 +44,7 @@ class TestIngestBackfill:
 
         source = MagicMock(spec=CoinbaseSource)
         source.name = "coinbase"
-        source.fetch_trades.return_value = trades
+        source.fetch_all_trades.return_value = trades
         source._client = True  # just needs to be truthy
 
         db = MagicMock()
@@ -56,7 +56,7 @@ class TestIngestBackfill:
 
         assert total == 10
         assert db.insert_trades.called
-        assert source.fetch_trades.called
+        assert source.fetch_all_trades.called
 
     @patch("arcana.pipeline.GracefulShutdown")
     @patch("arcana.pipeline.time_mod.sleep")
@@ -66,7 +66,7 @@ class TestIngestBackfill:
 
         source = MagicMock(spec=CoinbaseSource)
         source.name = "coinbase"
-        source.fetch_trades.return_value = []
+        source.fetch_all_trades.return_value = []
         source._client = True
 
         last = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
@@ -78,7 +78,7 @@ class TestIngestBackfill:
         ingest_backfill(source, db, "ETH-USD", since)
 
         # The first fetch_trades call should start from last, not since
-        first_call = source.fetch_trades.call_args_list[0]
+        first_call = source.fetch_all_trades.call_args_list[0]
         assert first_call.kwargs["start"] == last
 
     @patch("arcana.pipeline.GracefulShutdown")
@@ -92,7 +92,7 @@ class TestIngestBackfill:
 
         source = MagicMock(spec=CoinbaseSource)
         source.name = "coinbase"
-        source.fetch_trades.return_value = trades
+        source.fetch_all_trades.return_value = trades
         source._client = True
 
         db = MagicMock()
@@ -126,7 +126,7 @@ class TestIngestBackfill:
 
         source = MagicMock(spec=CoinbaseSource)
         source.name = "coinbase"
-        source.fetch_trades.side_effect = toggle_shutdown
+        source.fetch_all_trades.side_effect = toggle_shutdown
         source._client = True
 
         db = MagicMock()
