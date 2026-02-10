@@ -95,7 +95,7 @@ def ingest_backfill(
         window_num += 1
 
         try:
-            trades = source.fetch_trades(pair=pair, start=current, end=window_end)
+            trades = source.fetch_all_trades(pair=pair, start=current, end=window_end)
         except Exception:
             logger.exception(
                 "Failed to fetch window %d (%s → %s). Halting backfill.",
@@ -201,7 +201,7 @@ def run_daemon(
         now = datetime.now(timezone.utc)
 
         try:
-            trades = source.fetch_trades(pair=pair, start=last_ts, end=now)
+            trades = source.fetch_all_trades(pair=pair, start=last_ts, end=now)
             if trades:
                 inserted = db.insert_trades(trades)
                 new_last = db.get_last_timestamp(pair, source.name)
