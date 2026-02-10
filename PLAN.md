@@ -382,46 +382,35 @@ arcana status                                     # trade count, bar counts, las
 
 ## Coinbase API Details
 
-We use **two Coinbase APIs** — each serves a different purpose:
+We use the **Coinbase Advanced Trade API** — the public `/market/` endpoints require no authentication.
 
-### Exchange API (primary — used for backfill)
-**Base URL:** `https://api.exchange.coinbase.com`
-**Authentication:** None required (public market data)
-**Rate limit:** 3 req/s (public), 5 req/s (authenticated)
-
-**Endpoint:** `GET /products/{product_id}/trades`
-**Response:** Flat JSON array
-```json
-[
-  {
-    "time": "2026-02-10T14:30:01.123Z",
-    "trade_id": 98000050,          // INTEGER — monotonically increasing
-    "price": "2845.32",            // STRING — parse with Decimal
-    "size": "0.5",                 // STRING — parse with Decimal
-    "side": "sell"                 // LOWERCASE — this is the MAKER side
-  }
-]
-```
-**Pagination:** Cursor-based via `CB-AFTER` response header (use `?after=<trade_id>` for older pages)
-**Why we chose this:** Integer trade IDs make pagination deterministic — no gaps, no duplicates.
-
-### Advanced Trade API (secondary — for recent data / future use)
 **Base URL:** `https://api.coinbase.com`
-**Authentication:** None for `/market/` endpoints; JWT for higher rate limits
-**Rate limit:** 10 req/s (public), 30 req/s (authenticated)
+**Authentication:** None required for `/market/` endpoints
+**Rate limit:** 10 req/s (public), 30 req/s (authenticated with JWT)
 
-**Endpoint:** `GET /api/v3/brokerage/market/products/{product_id}/ticker`
-**Response:** Wrapped JSON object
+### Endpoint: Get Market Trades
+```
+GET /api/v3/brokerage/market/products/{product_id}/ticker
+```
+
+**Parameters:**
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `limit` | int | Yes | Number of trades to return |
+| `start` | string | No | UNIX timestamp — start of time window |
+| `end` | string | No | UNIX timestamp — end of time window |
+
+**Response:**
 ```json
 {
   "trades": [
     {
-      "trade_id": "uuid-string",   // UUID — not sequential
+      "trade_id": "uuid-string",
       "product_id": "ETH-USD",
       "price": "2845.32",
       "size": "0.5",
       "time": "2026-02-10T14:30:01.123Z",
-      "side": "BUY",               // UPPERCASE — this is the TAKER side
+      "side": "BUY",
       "exchange": "COINBASE"
     }
   ],
@@ -429,13 +418,32 @@ We use **two Coinbase APIs** — each serves a different purpose:
   "best_ask": "2845.35"
 }
 ```
-**Pagination:** Time-window via `start`/`end` UNIX timestamps.
 
-### Critical implementation notes
-1. **Side semantics differ:** Exchange API `side` = maker side (we invert it). Advanced Trade API `side` = taker side (use directly).
-2. **All numeric values are strings.** Must parse with `Decimal` — never `float` — for financial precision.
-3. **No API key needed for v1.** Public endpoints are sufficient for 15-minute batch intervals at 3 req/s.
-4. **Historical backfill:** The Exchange API's cursor pagination is reliable for systematic collection. For deep history, consider supplementing with CryptoCompare or Kaiko.
+### Key notes
+1. **`side` is the taker side** (`"BUY"`/`"SELL"`) — use directly, no inversion needed.
+2. **All numeric values are strings.** Parse with `Decimal`, never `float`.
+3. **Time-window pagination:** Use `start`/`end` UNIX timestamps to walk forward through time. No cursor management needed.
+4. **No API key needed for v1.** Public endpoints are sufficient.
+
+### Ingestion Strategy
+
+**Bulk backfill** (`arcana ingest ETH-USD --since 2025-01-01`):
+Walk forward through time in 1-hour windows:
+```
+Window 1: start=Jan 1 00:00, end=Jan 1 01:00 → fetch trades
+Window 2: start=Jan 1 01:00, end=Jan 1 02:00 → fetch trades
+...
+Window N: start=today 13:00, end=now → done
+```
+Each batch of trades is committed to the DB. On crash, resume from `MAX(timestamp)`.
+
+**Daemon mode** (`arcana run ETH-USD`):
+```
+Every 15 minutes:
+  start = MAX(timestamp) from raw_trades WHERE pair = 'ETH-USD'
+  end   = now
+  Fetch trades → store → build bars
+```
 
 ---
 
