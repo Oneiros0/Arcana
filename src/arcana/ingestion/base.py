@@ -25,6 +25,9 @@ class DataSource(ABC):
     ) -> list[Trade]:
         """Fetch trades for a given pair within an optional time window.
 
+        This is a single-request method — may not return all trades if the
+        source has a per-request limit.
+
         Args:
             pair: Trading pair, e.g. 'ETH-USD'.
             start: Inclusive start time (UTC). None means 'as early as possible'.
@@ -35,6 +38,27 @@ class DataSource(ABC):
             List of Trade objects, ordered by timestamp ascending.
         """
         ...
+
+    def fetch_all_trades(
+        self,
+        pair: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[Trade]:
+        """Fetch ALL trades in a time window, handling pagination automatically.
+
+        Subclasses should override this if the source has per-request limits
+        that require multiple calls to retrieve complete data.
+
+        Args:
+            pair: Trading pair, e.g. 'ETH-USD'.
+            start: Start of time window (UTC).
+            end: End of time window (UTC).
+
+        Returns:
+            List of all Trade objects in the range, ascending by timestamp.
+        """
+        return self.fetch_trades(pair=pair, start=start, end=end)
 
     @abstractmethod
     def get_supported_pairs(self) -> list[str]:
