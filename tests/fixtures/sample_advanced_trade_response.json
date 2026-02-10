@@ -1,32 +1,25 @@
 {
   "trades": [
-    {
-      "trade_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "product_id": "ETH-USD",
-      "price": "2845.32",
-      "size": "0.5",
-      "time": "2026-02-10T14:30:01.123Z",
-      "side": "BUY",
-      "exchange": "COINBASE"
-    },
-    {
-      "trade_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-      "product_id": "ETH-USD",
-      "price": "2845.30",
-      "size": "1.20000000",
-      "time": "2026-02-10T14:30:00.987Z",
-      "side": "SELL",
-      "exchange": "COINBASE"
-    },
-    {
-      "trade_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
-      "product_id": "ETH-USD",
-      "price": "2845.28",
-      "size": "0.00345000",
-      "time": "2026-02-10T14:30:00.654Z",
-      "side": "BUY",
-      "exchange": "COINBASE"
-    }
+    {"trade_id": "a1b2c3d4-0001", "product_id": "ETH-USD", "price": "2845.32", "size": "0.5", "time": "2026-02-10T14:30:01.123Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0002", "product_id": "ETH-USD", "price": "2845.30", "size": "1.20000000", "time": "2026-02-10T14:30:00.987Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0003", "product_id": "ETH-USD", "price": "2845.28", "size": "0.00345000", "time": "2026-02-10T14:30:00.654Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0004", "product_id": "ETH-USD", "price": "2845.50", "size": "3.00000000", "time": "2026-02-10T14:30:00.321Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0005", "product_id": "ETH-USD", "price": "2845.50", "size": "0.10000000", "time": "2026-02-10T14:29:59.999Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0006", "product_id": "ETH-USD", "price": "2845.48", "size": "0.75000000", "time": "2026-02-10T14:29:59.500Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0007", "product_id": "ETH-USD", "price": "2845.55", "size": "0.00100000", "time": "2026-02-10T14:29:58.200Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0008", "product_id": "ETH-USD", "price": "2845.60", "size": "5.00000000", "time": "2026-02-10T14:29:57.100Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0009", "product_id": "ETH-USD", "price": "2845.62", "size": "0.25000000", "time": "2026-02-10T14:29:55.800Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0010", "product_id": "ETH-USD", "price": "2845.58", "size": "0.08000000", "time": "2026-02-10T14:29:54.300Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0011", "product_id": "ETH-USD", "price": "2845.70", "size": "2.50000000", "time": "2026-02-10T14:29:52.100Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0012", "product_id": "ETH-USD", "price": "2845.65", "size": "0.15000000", "time": "2026-02-10T14:29:50.900Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0013", "product_id": "ETH-USD", "price": "2845.72", "size": "0.50000000", "time": "2026-02-10T14:29:48.500Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0014", "product_id": "ETH-USD", "price": "2845.68", "size": "1.00000000", "time": "2026-02-10T14:29:46.200Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0015", "product_id": "ETH-USD", "price": "2845.80", "size": "0.03000000", "time": "2026-02-10T14:29:44.000Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0016", "product_id": "ETH-USD", "price": "2845.75", "size": "0.90000000", "time": "2026-02-10T14:29:41.500Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0017", "product_id": "ETH-USD", "price": "2845.82", "size": "4.00000000", "time": "2026-02-10T14:29:39.200Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0018", "product_id": "ETH-USD", "price": "2845.78", "size": "0.12000000", "time": "2026-02-10T14:29:36.800Z", "side": "SELL", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0019", "product_id": "ETH-USD", "price": "2845.90", "size": "0.60000000", "time": "2026-02-10T14:29:34.100Z", "side": "BUY", "exchange": "COINBASE"},
+    {"trade_id": "a1b2c3d4-0020", "product_id": "ETH-USD", "price": "2845.85", "size": "0.04000000", "time": "2026-02-10T14:29:31.500Z", "side": "SELL", "exchange": "COINBASE"}
   ],
   "best_bid": "2845.25",
   "best_ask": "2845.35"
