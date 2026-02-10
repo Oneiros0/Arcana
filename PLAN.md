@@ -314,33 +314,33 @@ arcana status                                     # trade count, bar counts, las
 - [x] API response analysis & data exploration script
 
 **Ingestion Pipeline:**
-- [ ] Bulk ingestion command: `arcana ingest ETH-USD --since 2025-01-01`
-  - Backfills raw trades from `--since` date to present
+- [x] Bulk ingestion command: `arcana ingest ETH-USD --since 2025-01-01`
+  - Backfills raw trades from `--since` date to present via forward time-window walk
   - Writes to `raw_trades` table in batches
-  - Resumable — on restart, picks up from `MAX(trade_id)` for the pair
+  - Resumable — on restart, picks up from `MAX(timestamp)` for the pair
   - Progress logging (trades ingested, time range covered, ETA)
-- [ ] Daemon mode: `arcana run ETH-USD`
-  - On startup, detects last stored trade_id for the pair
-  - Polls Coinbase every 15 minutes for new trades
-  - Stores raw trades, then feeds new trades to bar builders inline
+- [x] Daemon mode: `arcana run ETH-USD`
+  - On startup, detects last stored timestamp for the pair
+  - Catches up any gap, then polls Coinbase every 15 minutes for new trades
+  - Stores raw trades (bar building inline deferred to bar builders phase)
   - Runs as a background process indefinitely
 
 **Failsafes & Resumability:**
-- [ ] Ingestion checkpointing — commit trades to DB in batches (e.g. every 1000 trades) so a crash mid-backfill loses at most one batch, not the whole run
-- [ ] Duplicate detection — `UNIQUE (source, trade_id)` constraint + `ON CONFLICT DO NOTHING` upserts so re-running ingestion over an overlapping range is safe
-- [ ] API failure retry — exponential backoff (2s, 4s, 8s, 16s) on HTTP errors, with max retries before logging and continuing
-- [ ] Daemon heartbeat — log last successful poll time; on restart, detect gap and backfill missed trades before resuming the poll loop
+- [x] Ingestion checkpointing — commit trades to DB in batches (every 1000 trades) so a crash mid-backfill loses at most one batch
+- [x] Duplicate detection — `UNIQUE (source, trade_id)` constraint + `ON CONFLICT DO NOTHING` upserts so re-running ingestion over an overlapping range is safe
+- [x] API failure retry — exponential backoff (2s, 4s, 8s, 16s) on HTTP errors, with max 4 retries before halting
+- [x] Daemon heartbeat — logs last successful poll time; on restart, detects gap and backfills missed trades before resuming the poll loop
 - [ ] Bar builder recovery — on startup, query last completed bar's `time_end`, re-fetch raw trades after that point, rebuild accumulator state, then continue. No persisted builder state needed.
-- [ ] Graceful shutdown — handle SIGINT/SIGTERM to finish current batch and commit before exiting
+- [x] Graceful shutdown — handles SIGINT/SIGTERM, finishes current batch and commits before exiting
 
 **Standard Bar Builders:**
 - [ ] Standard bar builders (time, tick, volume, dollar)
 - [ ] Bar auxiliary info computation (OHLCV, VWAP, tick count, time span)
 
 **CLI & Tests:**
-- [ ] CLI: `arcana db init`, `arcana ingest`, `arcana run`, `arcana status`
+- [x] CLI: `arcana db init`, `arcana ingest`, `arcana run`, `arcana status`
 - [ ] Unit tests for bar construction (known inputs -> expected outputs)
-- [ ] Integration tests for ingestion resumability (simulate crash + restart)
+- [x] Tests for pipeline (backfill, resume, checkpointing, graceful shutdown)
 - [ ] README with quickstart
 
 ### Phase 2 — Information-Driven Bars
