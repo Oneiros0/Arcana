@@ -4,7 +4,7 @@
 Run: python scripts/explore_coinbase.py [--live]
 
 Without --live, uses sample fixture data (works offline).
-With --live, hits the real Coinbase Exchange API.
+With --live, hits the real Coinbase Advanced Trade API (no auth needed).
 """
 
 import json
@@ -31,14 +31,12 @@ def section(title: str) -> None:
 
 
 def load_sample_trades() -> list[Trade]:
-    """Load trades from the sample Exchange API fixture."""
-    raw_path = FIXTURES_DIR / "sample_exchange_trades.json"
-    raw_trades = json.loads(raw_path.read_text())
+    """Load trades from the Advanced Trade API fixture."""
+    raw_path = FIXTURES_DIR / "sample_advanced_trade_response.json"
+    data = json.loads(raw_path.read_text())
 
     trades = []
-    for raw in raw_trades:
-        # Exchange API reports maker side — invert for taker side
-        taker_side = "buy" if raw["side"] == "sell" else "sell"
+    for raw in data["trades"]:
         trades.append(
             Trade(
                 timestamp=datetime.fromisoformat(raw["time"].replace("Z", "+00:00")),
@@ -47,73 +45,45 @@ def load_sample_trades() -> list[Trade]:
                 pair=PAIR,
                 price=Decimal(raw["price"]),
                 size=Decimal(raw["size"]),
-                side=taker_side,
+                side=raw["side"].lower(),  # API returns "BUY"/"SELL"
             )
         )
     return sorted(trades, key=lambda t: t.timestamp)
 
 
-def show_raw_api_shapes() -> None:
-    """Show both API response formats from fixture files."""
-    section("1. RAW API RESPONSE SHAPES")
+def show_raw_api_shape() -> None:
+    """Show the Advanced Trade API response format from fixture."""
+    section("1. RAW API RESPONSE SHAPE")
 
-    # --- Exchange API (api.exchange.coinbase.com) ---
-    print("EXCHANGE API: GET /products/ETH-USD/trades")
-    print("  Returns: JSON array (flat list)\n")
+    print("ADVANCED TRADE API (public, no auth):")
+    print("  GET /api/v3/brokerage/market/products/ETH-USD/ticker")
+    print("  Params: limit (required), start/end (optional, UNIX timestamps)\n")
 
-    exchange_path = FIXTURES_DIR / "sample_exchange_trades.json"
-    exchange_raw = json.loads(exchange_path.read_text())
+    raw_path = FIXTURES_DIR / "sample_advanced_trade_response.json"
+    data = json.loads(raw_path.read_text())
 
-    print(f"  Response type: list, length: {len(exchange_raw)}")
-    print(f"  First trade:")
-    print(json.dumps(exchange_raw[0], indent=4))
-    print(f"\n  Fields: {list(exchange_raw[0].keys())}")
+    print(f"  Response type: dict")
+    print(f"  Top-level keys: {list(data.keys())}")
+    print(f"  Trades count: {len(data['trades'])}")
+    print(f"  best_bid: {data['best_bid']}, best_ask: {data['best_ask']}")
+    print(f"\n  First trade:")
+    print(json.dumps(data["trades"][0], indent=4))
+    print(f"\n  Trade fields: {list(data['trades'][0].keys())}")
     print(f"  Field types:")
-    for k, v in exchange_raw[0].items():
+    for k, v in data["trades"][0].items():
         print(f"    {k}: {type(v).__name__} = {v!r}")
 
-    # --- Advanced Trade API ---
-    print(f"\n{'-' * 40}\n")
-    print("ADVANCED TRADE API: GET /api/v3/brokerage/market/products/ETH-USD/ticker")
-    print("  Returns: JSON object with 'trades' array + bid/ask\n")
-
-    adv_path = FIXTURES_DIR / "sample_advanced_trade_response.json"
-    adv_raw = json.loads(adv_path.read_text())
-
-    print(f"  Response type: dict, top-level keys: {list(adv_raw.keys())}")
-    print(f"  Trades count: {len(adv_raw['trades'])}")
-    print(f"  First trade:")
-    print(json.dumps(adv_raw["trades"][0], indent=4))
-    print(f"\n  Trade fields: {list(adv_raw['trades'][0].keys())}")
-    print(f"  Extra fields: best_bid={adv_raw['best_bid']}, best_ask={adv_raw['best_ask']}")
-
-    section("2. KEY DIFFERENCES BETWEEN APIS")
-
-    print("""  Exchange API (recommended for backfill):
-    - Flat JSON array response
-    - trade_id is INTEGER (monotonically increasing — great for pagination)
-    - side is LOWERCASE ("buy"/"sell") and means MAKER side
-    - No product_id/exchange fields in response
-    - Cursor pagination via CB-BEFORE/CB-AFTER headers
-    - Rate limit: 3 req/s (public)
-
-  Advanced Trade API (recommended for recent data):
-    - Wrapped in {"trades": [...], "best_bid": ..., "best_ask": ...}
-    - trade_id is UUID string
-    - side is UPPERCASE ("BUY"/"SELL") and means TAKER side
-    - Includes product_id and exchange fields
-    - Time-window pagination via start/end UNIX timestamps
-    - Rate limit: 10 req/s (public), 30 req/s (authenticated)
-
-  IMPORTANT for bar construction:
-    - Exchange API 'side' = maker side, so we INVERT it for taker side
-    - Advanced Trade API 'side' = taker side, use directly
-    - All prices/sizes are STRINGS — must parse to Decimal""")
+    print(f"\n  Key notes:")
+    print(f"    - side is TAKER side ('BUY'/'SELL') — use directly, no inversion")
+    print(f"    - trade_id is UUID string")
+    print(f"    - All prices/sizes are strings — parse with Decimal")
+    print(f"    - start/end params are UNIX timestamps for time-window queries")
+    print(f"    - Forward pagination: walk start/end windows through time")
 
 
 def analyze_trades(trades: list[Trade], source_label: str) -> None:
     """Compute statistics on a list of parsed trades."""
-    section(f"3. PARSED TRADES ({len(trades)} trades — {source_label})")
+    section(f"2. PARSED TRADES ({len(trades)} trades — {source_label})")
 
     if not trades:
         print("No trades!")
@@ -132,7 +102,7 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
             f"dollar_vol=${t.dollar_volume:.2f}"
         )
 
-    section("4. PRICE STATISTICS")
+    section("3. PRICE STATISTICS")
 
     prices = [float(t.price) for t in trades]
     sizes = [float(t.size) for t in trades]
@@ -143,21 +113,21 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
     if len(prices) > 1:
         print(f"Price stdev: ${statistics.stdev(prices):.4f}")
 
-    section("5. SIZE (VOLUME) STATISTICS")
+    section("4. SIZE (VOLUME) STATISTICS")
 
     print(f"Size range:  {min(sizes):.8f} — {max(sizes):.8f} ETH")
     print(f"Size mean:   {statistics.mean(sizes):.8f} ETH")
     print(f"Size median: {statistics.median(sizes):.8f} ETH")
     print(f"Total volume: {sum(sizes):.4f} ETH")
 
-    section("6. DOLLAR VOLUME STATISTICS")
+    section("5. DOLLAR VOLUME STATISTICS")
 
     print(f"Dollar vol range:  ${min(dollar_vols):.2f} — ${max(dollar_vols):.2f}")
     print(f"Dollar vol mean:   ${statistics.mean(dollar_vols):.2f}")
     print(f"Dollar vol median: ${statistics.median(dollar_vols):.2f}")
     print(f"Total dollar vol:  ${sum(dollar_vols):,.2f}")
 
-    section("7. TRADE FREQUENCY")
+    section("6. TRADE FREQUENCY")
 
     if span > 0:
         trades_per_sec = len(trades) / span
@@ -169,7 +139,7 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
     else:
         print("Span too short to compute frequency")
 
-    section("8. SIDE DISTRIBUTION & IMBALANCE")
+    section("7. SIDE DISTRIBUTION & IMBALANCE")
 
     buys = [t for t in trades if t.is_buy]
     sells = [t for t in trades if not t.is_buy]
@@ -182,12 +152,11 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
     print(f"Sell volume: {sell_vol:.4f} ETH")
     print(f"Volume imbalance: {buy_vol - sell_vol:+.4f} ETH")
 
-    # Tick imbalance (sum of signs)
     tick_imbalance = sum(t.sign() for t in trades)
     print(f"\nTick imbalance (sum of signs): {tick_imbalance:+d}")
     print(f"  (positive = net buying pressure, negative = net selling pressure)")
 
-    section("9. INTER-TRADE TIME ANALYSIS")
+    section("8. INTER-TRADE TIME ANALYSIS")
 
     if len(trades) > 1:
         deltas = []
@@ -205,7 +174,7 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
             f"({100 * zero_deltas / len(deltas):.1f}%)"
         )
 
-    section("10. BAR THRESHOLD SUGGESTIONS")
+    section("9. BAR THRESHOLD SUGGESTIONS")
 
     if span > 0:
         trades_per_min = len(trades) / (span / 60)
@@ -232,15 +201,15 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
 if __name__ == "__main__":
     live_mode = "--live" in sys.argv
 
-    print("Arcana — Coinbase API Exploration")
+    print("Arcana — Coinbase Advanced Trade API Exploration")
     print(f"Pair: {PAIR}")
     print(f"Mode: {'LIVE (hitting real API)' if live_mode else 'SAMPLE (using fixture data)'}")
 
-    show_raw_api_shapes()
+    show_raw_api_shape()
 
     if live_mode:
         with CoinbaseSource() as source:
-            trades = source.fetch_trades(pair=PAIR, limit=500)
+            trades = source.fetch_trades(pair=PAIR, limit=300)
         analyze_trades(trades, "live Coinbase API")
     else:
         trades = load_sample_trades()
