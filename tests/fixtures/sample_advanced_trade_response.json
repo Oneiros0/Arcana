@@ -1,0 +1,33 @@
+{
+  "trades": [
+    {
+      "trade_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "product_id": "ETH-USD",
+      "price": "2845.32",
+      "size": "0.5",
+      "time": "2026-02-10T14:30:01.123Z",
+      "side": "BUY",
+      "exchange": "COINBASE"
+    },
+    {
+      "trade_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "product_id": "ETH-USD",
+      "price": "2845.30",
+      "size": "1.20000000",
+      "time": "2026-02-10T14:30:00.987Z",
+      "side": "SELL",
+      "exchange": "COINBASE"
+    },
+    {
+      "trade_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "product_id": "ETH-USD",
+      "price": "2845.28",
+      "size": "0.00345000",
+      "time": "2026-02-10T14:30:00.654Z",
+      "side": "BUY",
+      "exchange": "COINBASE"
+    }
+  ],
+  "best_bid": "2845.25",
+  "best_ask": "2845.35"
+}
