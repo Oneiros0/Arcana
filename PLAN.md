@@ -306,10 +306,11 @@ arcana status                                     # trade count, bar counts, las
 ### Phase 1 — Foundation (MVP)
 **Goal:** Ingest trades from Coinbase, store them, build standard bars.
 
-- [ ] Project scaffolding (pyproject.toml, src layout, CI)
-- [ ] Trade data model (`Trade` dataclass with Pydantic validation)
-- [ ] Coinbase ingestion client (REST API, pagination, rate limiting)
-- [ ] TimescaleDB storage layer (connection, migrations, raw trade CRUD)
+- [x] Project scaffolding (pyproject.toml, src layout, CI)
+- [x] Trade data model (`Trade` dataclass with Pydantic validation)
+- [x] Coinbase ingestion client (REST API, pagination, rate limiting)
+- [x] TimescaleDB storage layer (connection, migrations, raw trade CRUD)
+- [x] API response analysis & data exploration script
 - [ ] Standard bar builders (time, tick, volume, dollar)
 - [ ] Bar auxiliary info computation (OHLCV, VWAP, tick count, time span)
 - [ ] CLI: `arcana db init`, `arcana ingest`, `arcana bars build` (standard types)
@@ -355,21 +356,60 @@ arcana status                                     # trade count, bar counts, las
 
 ## Coinbase API Details
 
-**API:** Coinbase Advanced Trade API (successor to Coinbase Pro)
-**Authentication:** API key + secret (free tier sufficient for historical trades)
-**Rate limits:** 10 requests/second for public endpoints
+We use **two Coinbase APIs** — each serves a different purpose:
 
-**Key endpoints:**
-- `GET /api/v3/brokerage/market/products/{product_id}/ticker` — current ticker
-- `GET /api/v3/brokerage/market/products/{product_id}/candles` — OHLCV candles (for validation)
-- Market trades via WebSocket feed for real-time (v2/future use)
+### Exchange API (primary — used for backfill)
+**Base URL:** `https://api.exchange.coinbase.com`
+**Authentication:** None required (public market data)
+**Rate limit:** 3 req/s (public), 5 req/s (authenticated)
 
-**Note:** Coinbase's REST API for individual trades has limitations. For historical trade data, we may need to:
-1. Use the WebSocket feed to collect trades going forward
-2. Use the candle endpoint for historical backfill validation
-3. Consider supplementing with a data provider like CryptoCompare or Kaiko for deep historical data
+**Endpoint:** `GET /products/{product_id}/trades`
+**Response:** Flat JSON array
+```json
+[
+  {
+    "time": "2026-02-10T14:30:01.123Z",
+    "trade_id": 98000050,          // INTEGER — monotonically increasing
+    "price": "2845.32",            // STRING — parse with Decimal
+    "size": "0.5",                 // STRING — parse with Decimal
+    "side": "sell"                 // LOWERCASE — this is the MAKER side
+  }
+]
+```
+**Pagination:** Cursor-based via `CB-AFTER` response header (use `?after=<trade_id>` for older pages)
+**Why we chose this:** Integer trade IDs make pagination deterministic — no gaps, no duplicates.
 
-This will be refined during Phase 1 implementation when we test the actual API behavior.
+### Advanced Trade API (secondary — for recent data / future use)
+**Base URL:** `https://api.coinbase.com`
+**Authentication:** None for `/market/` endpoints; JWT for higher rate limits
+**Rate limit:** 10 req/s (public), 30 req/s (authenticated)
+
+**Endpoint:** `GET /api/v3/brokerage/market/products/{product_id}/ticker`
+**Response:** Wrapped JSON object
+```json
+{
+  "trades": [
+    {
+      "trade_id": "uuid-string",   // UUID — not sequential
+      "product_id": "ETH-USD",
+      "price": "2845.32",
+      "size": "0.5",
+      "time": "2026-02-10T14:30:01.123Z",
+      "side": "BUY",               // UPPERCASE — this is the TAKER side
+      "exchange": "COINBASE"
+    }
+  ],
+  "best_bid": "2845.25",
+  "best_ask": "2845.35"
+}
+```
+**Pagination:** Time-window via `start`/`end` UNIX timestamps.
+
+### Critical implementation notes
+1. **Side semantics differ:** Exchange API `side` = maker side (we invert it). Advanced Trade API `side` = taker side (use directly).
+2. **All numeric values are strings.** Must parse with `Decimal` — never `float` — for financial precision.
+3. **No API key needed for v1.** Public endpoints are sufficient for 15-minute batch intervals at 3 req/s.
+4. **Historical backfill:** The Exchange API's cursor pagination is reliable for systematic collection. For deep history, consider supplementing with CryptoCompare or Kaiko.
 
 ---
 
