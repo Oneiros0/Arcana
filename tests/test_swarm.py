@@ -247,3 +247,24 @@ class TestSwarmCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["swarm", "status", "--help"])
         assert result.exit_code == 0
+
+    def test_swarm_stop_help(self):
+        from click.testing import CliRunner
+        from arcana.cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["swarm", "stop", "--help"])
+        assert result.exit_code == 0
+        assert "--remove-volumes" in result.output
+
+    def test_swarm_stop_missing_file(self, tmp_path):
+        from click.testing import CliRunner
+        from arcana.cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "swarm", "stop",
+            "--file", str(tmp_path / "nonexistent.yml"),
+        ])
+        assert result.exit_code == 1
+        assert "not found" in result.output
