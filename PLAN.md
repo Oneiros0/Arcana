@@ -510,7 +510,7 @@ GET /api/v3/brokerage/market/products/{product_id}/ticker
 **Parameters:**
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `limit` | int | Yes | Number of trades to return |
+| `limit` | int | Yes | Number of trades to return (max 1000; 2500+ returns 500 error) |
 | `start` | string | No | UNIX timestamp — start of time window |
 | `end` | string | No | UNIX timestamp — end of time window |
 
@@ -551,19 +551,21 @@ Window N: start=today 13:00, end=now → done
 ```
 Each batch of trades is committed to the DB in groups of 1000. On crash, resume from `MAX(timestamp)`.
 
-**Backward sequential pagination:** The API returns at most 300 trades per request (newest first). For busy windows (300+ trades per 15 minutes), `fetch_all_trades()` pages backward from `end`:
+**Backward sequential pagination:** The API returns at most 1000 trades per request (newest first). For busy windows (1000+ trades per 15 minutes), `fetch_all_trades()` pages backward from `end`:
 
 ```
-fetch_all_trades(14:00, 14:15)       # ~600 trades in this window
-  Page 1: fetch(14:00, 14:15) → 300 trades (14:07–14:15)
-  Page 2: fetch(14:00, 14:07) → 300 trades (14:01–14:07)
-  Page 3: fetch(14:00, 14:01) → 42 trades  (14:00–14:01) ← under limit, done
-  → merge & dedup by trade_id → 642 trades, sorted ascending
+fetch_all_trades(14:00, 14:15)       # ~2500 trades in this window
+  Page 1: fetch(14:00, 14:15) → 1000 trades (14:10–14:15)
+  Page 2: fetch(14:00, 14:10) → 1000 trades (14:05–14:10)
+  Page 3: fetch(14:00, 14:05) → 500 trades  (14:00–14:05) ← under limit, done
+  → merge & dedup by trade_id → 2500 trades, sorted ascending
 ```
 
-Each page shifts `current_end` to the earliest timestamp seen, walking backward until a page returns fewer than 300 trades (meaning we've captured everything down to `start`). This is O(N/300) API calls — the theoretical minimum, with no wasted probe calls.
+Each page shifts `current_end` to the earliest timestamp seen, walking backward until a page returns fewer than 1000 trades (meaning we've captured everything down to `start`). This is O(N/1000) API calls — the theoretical minimum, with no wasted probe calls.
 
-**Rate limiting:** 0.12s delay between API calls (~8 req/s, under the 10 req/s public limit). A 15-minute window with ~6000 trades needs ~20 API calls × 0.12s = ~2.4s per window.
+**Note:** The undocumented API limit ceiling is 1000. Values of 2500+ return a 500 Internal Server Error. This was empirically determined via `scripts/test_api_limit.py`.
+
+**Rate limiting:** 0.12s delay between API calls (~8 req/s, under the 10 req/s public limit). A 15-minute window with ~6000 trades needs ~6 API calls × 0.12s = ~0.7s per window.
 
 **Daemon mode** (`arcana run ETH-USD`):
 ```

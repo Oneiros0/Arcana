@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.coinbase.com"
 API_PREFIX = "/api/v3/brokerage/market"
-DEFAULT_LIMIT = 300
+DEFAULT_LIMIT = 1000  # API accepts up to 1000; 2500+ returns 500 errors
 RATE_LIMIT_DELAY = 0.12  # ~8 req/s with margin (limit is 10)
 MAX_RETRIES = 4
 RETRY_BACKOFF = [2, 4, 8, 16]
@@ -131,12 +131,11 @@ class CoinbaseSource(DataSource):
         """Fetch ALL trades in a time window using backward sequential pagination.
 
         The Coinbase API returns the most recent trades first. When a single
-        call hits the 300-trade limit, we page backward by moving `end` to
+        call hits the 1000-trade limit, we page backward by moving `end` to
         before the earliest returned trade and fetching again. Each API call
         produces useful data — no wasted probe calls.
 
-        For a window with 25K trades, this makes ~84 calls (25000/300)
-        instead of ~255 with the old binary subdivision approach.
+        For a window with 25K trades, this makes ~25 calls (25000/1000).
 
         Args:
             pair: Trading pair, e.g. 'ETH-USD'.
