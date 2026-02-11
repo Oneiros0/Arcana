@@ -154,6 +154,16 @@ class TestGenerateCompose:
 
         assert "healthcheck" in compose["services"]["db"]
 
+    def test_workers_have_rate_delay(self):
+        since = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 4, 1, tzinfo=timezone.utc)
+        compose = generate_compose("ETH-USD", since, until, workers=4)
+
+        workers = {k: v for k, v in compose["services"].items() if k != "db"}
+        for name, svc in workers.items():
+            # 4 workers * 0.12 = 0.48s per worker
+            assert svc["environment"]["ARCANA_RATE_DELAY"] == "0.48"
+
     def test_restart_on_failure(self):
         since = datetime(2024, 1, 1, tzinfo=timezone.utc)
         until = datetime(2024, 2, 1, tzinfo=timezone.utc)
@@ -176,14 +186,22 @@ class TestFormatSummary:
         assert "12" in summary
         assert "730 days" in summary
 
+    def test_summary_shows_rate_info(self):
+        since = datetime(2022, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        summary = format_worker_summary("ETH-USD", since, until, 4)
+
+        assert "delay" in summary
+        assert "req/s" in summary
+
     def test_summary_lists_all_workers(self):
         since = datetime(2024, 1, 1, tzinfo=timezone.utc)
         until = datetime(2024, 4, 1, tzinfo=timezone.utc)
         summary = format_worker_summary("ETH-USD", since, until, 3)
 
         lines = summary.strip().split("\n")
-        # Header + column header + divider + 3 workers = at least 6 lines
-        assert len(lines) >= 6
+        # Header + rate info + column header + divider + 3 workers = at least 7 lines
+        assert len(lines) >= 7
 
 
 class TestSwarmCLI:

@@ -92,6 +92,11 @@ def generate_compose(
     """
     chunks = split_range(since, until, workers)
 
+    # Scale the per-worker rate delay so the aggregate stays under 10 req/s.
+    # Single process: 0.12s delay = ~8 req/s. With N workers sharing one IP,
+    # each worker sleeps N * 0.12s between pagination calls.
+    rate_delay = round(workers * 0.12, 2)
+
     services: dict = {
         "db": {
             "image": "timescale/timescaledb:latest-pg16",
@@ -129,6 +134,7 @@ def generate_compose(
                 "ARCANA_DB_NAME": db_name,
                 "ARCANA_DB_USER": db_user,
                 "ARCANA_DB_PASSWORD": db_password,
+                "ARCANA_RATE_DELAY": str(rate_delay),
             },
             "depends_on": {
                 "db": {"condition": "service_healthy"},
@@ -176,10 +182,14 @@ def format_worker_summary(
     total_days = (until - since).days
     days_per_worker = total_days / workers
 
+    rate_delay = round(workers * 0.12, 2)
+    per_worker_rps = round(1 / rate_delay, 1) if rate_delay > 0 else 0
+
     lines = [
         f"Swarm plan: {pair} | {since.date()} → {until.date()} "
         f"({total_days} days)",
-        f"Workers: {workers} (~{days_per_worker:.1f} days each)",
+        f"Workers: {workers} (~{days_per_worker:.1f} days each, "
+        f"{rate_delay}s delay = ~{per_worker_rps} req/s each)",
         "",
         f"  {'#':>3s}  {'start':>12s}  {'end':>12s}  {'days':>5s}",
         f"  {'─' * 3}  {'─' * 12}  {'─' * 12}  {'─' * 5}",

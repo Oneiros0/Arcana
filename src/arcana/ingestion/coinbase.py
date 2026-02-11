@@ -11,6 +11,7 @@ Key advantages over the Exchange API:
 """
 
 import logging
+import os
 import time as time_mod
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -48,6 +49,8 @@ class CoinbaseSource(DataSource):
             headers={"Content-Type": "application/json"},
             timeout=30.0,
         )
+        # Allow swarm to scale the delay so N workers share the 10 req/s budget
+        self._rate_delay = float(os.environ.get("ARCANA_RATE_DELAY", RATE_LIMIT_DELAY))
 
     @property
     def name(self) -> str:
@@ -183,7 +186,7 @@ class CoinbaseSource(DataSource):
                 break  # Reached the start boundary
 
             current_end = datetime.fromtimestamp(earliest_unix, tz=timezone.utc)
-            time_mod.sleep(RATE_LIMIT_DELAY)
+            time_mod.sleep(self._rate_delay)
 
         if pages > 1:
             logger.debug(
