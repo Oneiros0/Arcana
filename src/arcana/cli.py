@@ -325,7 +325,7 @@ def swarm_launch(
 @click.option("--port", default=5432, type=int, help="Database port.")
 @click.option("--database", default="arcana", help="Database name.")
 @click.option("--user", default="arcana", help="Database user.")
-@click.option("--password", default="", help="Database password.")
+@click.option("--password", default="arcana", help="Database password.")
 def swarm_status(
     pair: str,
     host: str,
@@ -387,6 +387,38 @@ def swarm_status(
         raise SystemExit(1)
 
 
+@swarm.command("stop")
+@click.option("--file", "compose_file", default="docker-compose.swarm.yml", help="Compose file.")
+@click.option("--remove-volumes", is_flag=True, help="Also remove data volumes.")
+def swarm_stop(compose_file: str, remove_volumes: bool) -> None:
+    """Stop a running swarm and tear down containers.
+
+    Example: arcana swarm stop
+    """
+    import subprocess
+    from pathlib import Path
+
+    path = Path(compose_file)
+    if not path.exists():
+        click.echo(f"Compose file not found: {compose_file}", err=True)
+        raise SystemExit(1)
+
+    cmd = ["docker", "compose", "-f", str(path), "down"]
+    if remove_volumes:
+        cmd.append("-v")
+
+    click.echo(f"Stopping swarm ({compose_file})...")
+    result = subprocess.run(cmd, check=False)
+    if result.returncode == 0:
+        msg = "Swarm stopped."
+        if remove_volumes:
+            msg += " Volumes removed."
+        click.echo(msg)
+    else:
+        click.echo("Failed to stop swarm. Check Docker output above.", err=True)
+        raise SystemExit(1)
+
+
 @swarm.command("validate")
 @click.argument("pair")
 @click.option(
@@ -411,7 +443,7 @@ def swarm_status(
 @click.option("--port", default=5432, type=int, help="Database port.")
 @click.option("--database", default="arcana", help="Database name.")
 @click.option("--user", default="arcana", help="Database user.")
-@click.option("--password", default="", help="Database password.")
+@click.option("--password", default="arcana", help="Database password.")
 def swarm_validate(
     pair: str,
     since: datetime,
