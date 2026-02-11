@@ -194,9 +194,9 @@ class TestFetchAllTrades:
     @patch("arcana.ingestion.coinbase.time_mod.sleep")
     def test_pages_backward_when_at_limit(self, mock_sleep):
         """When API returns DEFAULT_LIMIT, should page backward for more."""
-        # Page 1: newest 300 trades (14:55:00 - 14:59:59)
+        # Page 1: newest trades at limit (14:55:00+)
         page1 = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:55:00Z", prefix="p1")
-        # Page 2: older trades (14:50:00 - 14:54:59), under limit = done
+        # Page 2: older trades, under limit = done
         page2 = _make_raw_trades(200, "2026-02-10T14:50:00Z", prefix="p2")
 
         source = CoinbaseSource()
@@ -212,7 +212,7 @@ class TestFetchAllTrades:
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
         assert source._client.get.call_count == 2
-        assert len(trades) == 500  # 300 + 200
+        assert len(trades) == DEFAULT_LIMIT + 200
 
     @patch("arcana.ingestion.coinbase.time_mod.sleep")
     def test_multiple_pages(self, mock_sleep):
@@ -235,7 +235,7 @@ class TestFetchAllTrades:
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
         assert source._client.get.call_count == 3
-        assert len(trades) == 750  # 300 + 300 + 150
+        assert len(trades) == DEFAULT_LIMIT * 2 + 150
         # All sorted ascending
         for i in range(1, len(trades)):
             assert trades[i].timestamp >= trades[i - 1].timestamp
@@ -251,7 +251,7 @@ class TestFetchAllTrades:
         source = CoinbaseSource()
         source._client = MagicMock()
         source._client.get.side_effect = [
-            _mock_response({"trades": newer + boundary}),  # page 1: newest 300
+            _mock_response({"trades": newer + boundary}),  # page 1: at limit
             _mock_response({"trades": boundary + older}),   # page 2: overlap + older
         ]
 
@@ -260,8 +260,8 @@ class TestFetchAllTrades:
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
-        # 290 newer + 10 shared + 80 older = 380 unique
-        assert len(trades) == 380
+        # (DEFAULT_LIMIT - 10) newer + 10 shared + 80 older = unique
+        assert len(trades) == DEFAULT_LIMIT - 10 + 10 + 80
         trade_ids = [t.trade_id for t in trades]
         assert len(trade_ids) == len(set(trade_ids))
 
