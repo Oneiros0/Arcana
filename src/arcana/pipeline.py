@@ -40,9 +40,10 @@ def ingest_backfill(
     db: Database,
     pair: str,
     since: datetime,
+    until: datetime | None = None,
     window: timedelta = DEFAULT_WINDOW,
 ) -> int:
-    """Bulk backfill trades from `since` to now.
+    """Bulk backfill trades from `since` to `until` (or now).
 
     Walks forward through time in windows, committing each batch
     to the database. Resumable — on restart, starts from the last
@@ -53,6 +54,7 @@ def ingest_backfill(
         db: Database to store trades in.
         pair: Trading pair, e.g. 'ETH-USD'.
         since: Start date for backfill.
+        until: End date for backfill. Defaults to now.
         window: Size of each time window to query.
 
     Returns:
@@ -66,7 +68,7 @@ def ingest_backfill(
         logger.info("Resuming from %s (found existing data)", last_ts.isoformat())
         since = last_ts
 
-    end = datetime.now(timezone.utc)
+    end = until or datetime.now(timezone.utc)
     total_windows = max(1, int((end - since) / window) + 1)
     current = since
     window_num = 0
