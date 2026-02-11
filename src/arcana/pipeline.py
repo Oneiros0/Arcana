@@ -17,7 +17,7 @@ from arcana.storage.database import Database
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 1000  # Trades per DB commit
-DEFAULT_WINDOW = timedelta(hours=1)
+DEFAULT_WINDOW = timedelta(minutes=15)
 DAEMON_INTERVAL = 15 * 60  # 15 minutes in seconds
 
 
