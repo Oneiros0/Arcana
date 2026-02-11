@@ -1,13 +1,19 @@
 """TimescaleDB connection and schema management."""
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import psycopg
 from psycopg.rows import dict_row
 
 from arcana.config import DatabaseConfig
 from arcana.ingestion.models import Trade
+
+if TYPE_CHECKING:
+    from arcana.bars.base import Bar
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,27 @@ UPSERT_TRADES = """
 INSERT INTO raw_trades (timestamp, trade_id, source, pair, price, size, side)
 VALUES (%s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (source, trade_id) DO NOTHING;
+"""
+
+UPSERT_BARS = """
+INSERT INTO bars (
+    time_start, time_end, bar_type, source, pair,
+    open, high, low, close, vwap,
+    volume, dollar_volume, tick_count, time_span, metadata
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (bar_type, source, pair, time_start) DO UPDATE SET
+    time_end = EXCLUDED.time_end,
+    open = EXCLUDED.open,
+    high = EXCLUDED.high,
+    low = EXCLUDED.low,
+    close = EXCLUDED.close,
+    vwap = EXCLUDED.vwap,
+    volume = EXCLUDED.volume,
+    dollar_volume = EXCLUDED.dollar_volume,
+    tick_count = EXCLUDED.tick_count,
+    time_span = EXCLUDED.time_span,
+    metadata = EXCLUDED.metadata;
 """
 
 
@@ -160,6 +187,124 @@ class Database:
             )
             row = cur.fetchone()
             return row[0] if row and row[0] else None
+
+    def insert_bars(self, bars: list[Bar]) -> int:
+        """Batch upsert bars into the bars table.
+
+        Uses ON CONFLICT DO UPDATE so re-building bars over the same
+        time range replaces stale data.
+
+        Returns:
+            Number of rows upserted.
+        """
+        import json
+
+        if not bars:
+            return 0
+
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.executemany(
+                UPSERT_BARS,
+                [
+                    (
+                        b.time_start,
+                        b.time_end,
+                        b.bar_type,
+                        b.source,
+                        b.pair,
+                        b.open,
+                        b.high,
+                        b.low,
+                        b.close,
+                        b.vwap,
+                        b.volume,
+                        b.dollar_volume,
+                        b.tick_count,
+                        b.time_span,
+                        json.dumps(b.metadata) if b.metadata else None,
+                    )
+                    for b in bars
+                ],
+            )
+        conn.commit()
+        logger.debug("Upserted %d bars", len(bars))
+        return len(bars)
+
+    def get_last_bar_time(
+        self, bar_type: str, pair: str, source: str = "coinbase"
+    ) -> datetime | None:
+        """Get the time_end of the most recent bar for a given type/pair.
+
+        Used by bar builders to know where to resume construction.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(time_end) FROM bars "
+                "WHERE bar_type = %s AND pair = %s AND source = %s",
+                (bar_type, pair, source),
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+
+    def get_bar_count(
+        self, bar_type: str | None = None, pair: str | None = None
+    ) -> int:
+        """Get bar count, optionally filtered by type and/or pair."""
+        conn = self.connect()
+        conditions: list[str] = []
+        params: list[str] = []
+        if bar_type:
+            conditions.append("bar_type = %s")
+            params.append(bar_type)
+        if pair:
+            conditions.append("pair = %s")
+            params.append(pair)
+
+        query = "SELECT COUNT(*) FROM bars"
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def get_trades_since(
+        self,
+        pair: str,
+        since: datetime,
+        source: str = "coinbase",
+        limit: int = 100_000,
+    ) -> list[Trade]:
+        """Fetch raw trades from the database after a given timestamp.
+
+        Used by bar builders to load trades for construction.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT timestamp, trade_id, source, pair, price, size, side "
+                "FROM raw_trades "
+                "WHERE pair = %s AND source = %s AND timestamp > %s "
+                "ORDER BY timestamp ASC LIMIT %s",
+                (pair, source, since, limit),
+            )
+            rows = cur.fetchall()
+
+        return [
+            Trade(
+                timestamp=r[0],
+                trade_id=r[1],
+                source=r[2],
+                pair=r[3],
+                price=r[4],
+                size=r[5],
+                side=r[6],
+            )
+            for r in rows
+        ]
 
     def get_trade_count(self, pair: str | None = None) -> int:
         """Get total trade count, optionally filtered by pair."""
