@@ -12,8 +12,11 @@ from arcana.pipeline import DAEMON_INTERVAL, ingest_backfill, run_daemon
 from arcana.storage.database import Database
 
 
-def _setup_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
+
+def _setup_logging(log_level: str) -> None:
+    level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -23,10 +26,15 @@ def _setup_logging(verbose: bool) -> None:
 
 
 @click.group()
-@click.option("-v", "--verbose", is_flag=True, help="Enable debug logging.")
-def cli(verbose: bool) -> None:
+@click.option(
+    "--log-level",
+    type=click.Choice(LOG_LEVELS, case_sensitive=False),
+    default="INFO",
+    help="Set logging verbosity.",
+)
+def cli(log_level: str) -> None:
     """Arcana — Quantitative trading data pipeline."""
-    _setup_logging(verbose)
+    _setup_logging(log_level)
 
 
 # --- Database commands ---
