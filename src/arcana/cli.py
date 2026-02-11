@@ -249,6 +249,7 @@ def swarm() -> None:
 @click.option("--database", default="arcana", help="Database name.")
 @click.option("--user", default="arcana", help="Database user.")
 @click.option("--password", default="arcana", help="Database password.")
+@click.option("--multi-ip", is_flag=True, help="Workers have separate IPs (VPN/proxy); skip rate-delay scaling.")
 @click.option("--up", is_flag=True, help="Run docker compose up after generating.")
 def swarm_launch(
     pair: str,
@@ -262,6 +263,7 @@ def swarm_launch(
     database: str,
     user: str,
     password: str,
+    multi_ip: bool,
     up: bool,
 ) -> None:
     """Generate a docker-compose file and optionally launch the swarm.
@@ -276,7 +278,7 @@ def swarm_launch(
     until_utc = until.replace(tzinfo=timezone.utc) if until else datetime.now(timezone.utc)
 
     # Show the plan
-    summary = format_worker_summary(pair, since_utc, until_utc, workers)
+    summary = format_worker_summary(pair, since_utc, until_utc, workers, multi_ip=multi_ip)
     click.echo(summary)
     click.echo()
 
@@ -292,6 +294,7 @@ def swarm_launch(
         db_user=user,
         db_password=password,
         image=image,
+        multi_ip=multi_ip,
     )
 
     out_path = write_compose(compose, Path(output))
