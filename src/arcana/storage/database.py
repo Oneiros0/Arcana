@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS raw_trades (
     price        NUMERIC       NOT NULL,
     size         NUMERIC       NOT NULL,
     side         TEXT          NOT NULL,
-    UNIQUE (source, trade_id)
+    UNIQUE (source, trade_id, timestamp)
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_trades_pair_ts
@@ -65,7 +65,7 @@ SELECT create_hypertable('bars', 'time_start', if_not_exists => TRUE);
 UPSERT_TRADES = """
 INSERT INTO raw_trades (timestamp, trade_id, source, pair, price, size, side)
 VALUES (%s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (source, trade_id) DO NOTHING;
+ON CONFLICT (source, trade_id, timestamp) DO NOTHING;
 """
 
 UPSERT_BARS = """
