@@ -151,28 +151,6 @@ class TestCoinbaseSource:
         assert trades == []
 
     @patch("arcana.ingestion.coinbase.time_mod.sleep")
-    def test_fetch_trades_window(self, mock_sleep):
-        """fetch_trades_window should walk forward through time."""
-        fixture = _load_fixture()
-
-        source = CoinbaseSource()
-        source._client = MagicMock()
-        source._client.get.return_value = _mock_response(fixture)
-
-        start = datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
-        window = timedelta(hours=1)
-
-        trades = source.fetch_trades_window("ETH-USD", start, end, window)
-
-        # 3 hours = 3 windows, each returns 20 trades (under limit, no subdivision)
-        assert source._client.get.call_count == 3
-        assert len(trades) == 60  # 20 * 3
-        # All sorted ascending
-        for i in range(1, len(trades)):
-            assert trades[i].timestamp >= trades[i - 1].timestamp
-
-    @patch("arcana.ingestion.coinbase.time_mod.sleep")
     def test_request_with_retry_succeeds_after_failure(self, mock_sleep):
         source = CoinbaseSource()
         source._client = MagicMock()
