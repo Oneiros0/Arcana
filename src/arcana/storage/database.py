@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import psycopg
-from psycopg.rows import dict_row
 
 from arcana.config import DatabaseConfig
 from arcana.ingestion.models import Trade
