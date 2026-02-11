@@ -12,7 +12,7 @@ The goal: provide researchers and quant developers with properly structured bars
 
 | Component | Status | Details |
 |---|---|---|
-| **Ingestion pipeline** | Done | Backfill + daemon mode, binary subdivision pagination, graceful shutdown |
+| **Ingestion pipeline** | Done | Backfill + daemon mode, backward sequential pagination, graceful shutdown |
 | **Coinbase API client** | Done | Advanced Trade API, retry with backoff, rate limiting |
 | **Database layer** | Done | raw_trades + bars tables, upsert, trade/bar CRUD |
 | **Standard bar builders** | Done | Time, tick, volume, dollar — all with OHLCV + VWAP |
@@ -20,8 +20,8 @@ The goal: provide researchers and quant developers with properly structured bars
 | **Bar builder recovery** | Not started | DB methods exist, orchestration not connected |
 | **Information-driven bars** | Not started | TIB, VIB, DIB, TRB, VRB, DRB (Phase 2) |
 
-**Codebase:** 1,489 lines source / 1,036 lines test / 64 tests passing
-**Git:** 10 commits on `claude/plan-trading-pipeline-aNfsS`
+**Codebase:** 1,456 lines source / 998 lines test / 63 tests passing
+**Git:** 12 commits on `claude/plan-trading-pipeline-aNfsS`
 
 ---
 
@@ -38,6 +38,83 @@ The goal: provide researchers and quant developers with properly structured bars
 | Bar auxiliary info | VWAP, tick count, time span, high, low, open, close | Per Prado's recommendation for downstream ML |
 | Distribution | pip-installable library with CLI | `pip install arcana` + `arcana` CLI commands |
 | License | Apache 2.0 | Patent protection, commercial-friendly, standard for data/ML projects |
+
+### Explicit Design Decisions (Addressing Open Questions)
+
+These decisions were identified during peer review and are recorded here so they're explicit rather than implicit.
+
+**1. Decimal stays Decimal — no float conversion in the hot path.**
+The entire bar construction pipeline — `Trade`, `Accumulator`, `Bar` — uses `Decimal` end to end. VWAP is computed as `sum(price * size) / sum(size)` in Decimal arithmetic. There is no conversion to float64 anywhere in the ingestion → accumulation → bar emission path. This is deliberate: financial data demands exact arithmetic, and Prado's bar math (especially dollar bars and VWAP) is sensitive to rounding drift.
+
+`pandas` and `numpy` are listed as dependencies for *downstream analysis* (e.g., loading bars into DataFrames for feature engineering, computing rolling statistics). The Decimal→float boundary lives at the **export layer** — when bars are loaded into a DataFrame for ML consumption, `Decimal` columns are cast to `float64`. This is acceptable because ML models operate in float space anyway, and the precision loss at that stage is irrelevant (it's O(10⁻¹⁵) on prices in the thousands). The critical property is that bar *construction* never loses precision.
+
+**2. EWMA state persistence: stored in `metadata` JSONB on the last emitted bar.**
+When a daemon restarts, imbalance/run bar builders recover by:
+1. Loading the last emitted bar for their `bar_type` via `get_last_bar_time()`
+2. Reading EWMA state from that bar's `metadata` field: `{"ewma_expected_imbalance": 142.5, "ewma_window": 15, "ewma_bar_count": 3200, "last_trade_sign": 1}`
+3. Reconstructing the EWMA estimator from these values
+
+This means the first bar after restart has the correct adaptive threshold — no warmup period needed. The tradeoff: EWMA state is coupled to the bar table, so deleting bars loses the state. This is acceptable because rebuilding bars from raw trades is idempotent and will regenerate the EWMA progression.
+
+If EWMA state becomes complex enough to warrant its own table (e.g., multiple concurrent EWMA windows per bar type), we'll promote it. For v1, metadata JSONB is sufficient.
+
+**3. `flush()` semantics: end-of-data and shutdown only, never between batches.**
+This is a correctness invariant. `process_trades()` is designed to be called repeatedly with successive batches — the `Accumulator` carries state across calls. `flush()` forces emission of the in-progress partial bar, which is destructive (resets the accumulator). Calling `flush()` between batches would produce bars that violate the sampling threshold.
+
+Concretely:
+- **Between batches:** Do not call `flush()`. The accumulator state persists in memory.
+- **End of data** (backfill complete): Call `flush()` to emit the final partial bar.
+- **Shutdown** (SIGINT/SIGTERM): Call `flush()` during graceful shutdown to avoid losing accumulated state.
+- **Daemon restart:** Accumulator state is lost. Rebuild from the last emitted bar's `time_end` using `get_trades_since()`. This produces a correct bar because we replay the exact trades.
+
+For imbalance/run bars, flushing is even more critical to avoid: a premature flush would emit a bar before the adaptive EWMA threshold is reached, producing a bar with wrong statistical properties. The orchestration layer must never flush between batches.
+
+**4. Trade sign: use exchange-provided `side` when available, tick rule as fallback.**
+Coinbase provides the taker side (`BUY`/`SELL`) on every trade. The `Trade.sign()` method returns `+1` for buy, `-1` for sell using this directly. This is more accurate than the tick rule (which infers sign from price movement) because the tick rule:
+- Misclassifies trades at the same price as the previous trade (carry-forward heuristic)
+- Cannot distinguish a buy at the ask from a sell at the bid when the price doesn't change
+- Is a workaround for data that lacks side information, not an improvement over having it
+
+**Decision:** For sources that provide `side` (Coinbase, Binance), use it directly. The tick rule (`imbalance.py`, Phase 2) will be implemented as a utility for sources that don't provide side information (e.g., some equity feeds, DEX event logs where taker side may not be explicit). The `DataSource` ABC does not mandate that `side` is populated — it can be `"unknown"`, which signals the bar builder to apply the tick rule.
+
+**5. Data quality: trust exchange data as-is for v1.**
+We do not filter outliers, detect flash crashes, or remove erroneous trades. A single fat-finger trade at 10x market price will produce a bar with a distorted high/VWAP. This is a deliberate v1 simplification:
+- Exchange-reported trades have already passed the exchange's matching engine validation
+- Defining "outlier" requires a reference price, which introduces a circular dependency for bar construction
+- Prado's methods are designed for exchange-quality data and don't include a preprocessing filter
+
+**Future (v2+):** Add an optional `TradeFilter` interface that can be injected before bar construction. Possible filters: z-score on price relative to a rolling window, minimum/maximum trade size, exchange-reported trade cancellations. This is deferred because it's a feature-engineering concern, not a bar construction concern.
+
+**6. Timestamp normalization: UTC everywhere, single-source assumption for v1.**
+All timestamps are stored as `TIMESTAMPTZ` (UTC). The `Trade` model enforces UTC via Pydantic. For v1 with a single source (Coinbase), clock synchronization is not a concern — all timestamps come from the same exchange clock.
+
+**Future multi-source consideration:** When merging trades from multiple exchanges (e.g., Coinbase + Binance for cross-exchange arbitrage bars), clock skew of 10-100ms is typical between exchanges. The `DataSource` ABC does not address this. When we add a second source, we'll need to decide: (a) trust exchange timestamps as-is (simple, accepts skew), (b) apply NTP-style offset correction per source, or (c) use arrival time at our ingestion layer. Option (a) is likely sufficient for bar construction at minute+ granularity.
+
+**7. Bar `metadata` JSONB column: what goes where.**
+The `metadata` column stores bar-type-specific information that doesn't apply to all bars. Current plan:
+
+| Field | Column or metadata? | Rationale |
+|---|---|---|
+| OHLCV, VWAP, tick_count | Promoted columns | Universal, queried frequently |
+| EWMA expected imbalance | metadata | Only for imbalance/run bars |
+| EWMA window size | metadata | Configuration, not data |
+| Threshold that triggered emission | metadata | Useful for analysis but not queried in SQL |
+| Cumulative imbalance at emission | metadata | Diagnostic, imbalance bars only |
+| Run length at emission | metadata | Diagnostic, run bars only |
+
+**Promotion rule:** If we find ourselves writing `WHERE metadata->>'field' = ...` in production queries, that field should be promoted to a column. For v1, the current schema is sufficient. The `UNIQUE (bar_type, source, pair, time_start)` constraint covers all query patterns we need.
+
+**8. `--ewma-window` CLI: single window per bar builder instance.**
+Each `arcana bars build --type tib --ewma-window 15` invocation creates one bar builder with one EWMA window. To build TIBs at multiple EWMA windows simultaneously, run multiple commands (or a future `arcana.toml` config that specifies a list). This keeps the CLI simple and the bar builder stateless with respect to window configuration. The "3, 5, 15, 30, 60 (configurable)" in the design decisions table refers to the recommended set of windows for research, not a requirement that they all run simultaneously.
+
+**9. Logging: structured, level-based, configurable.**
+The pipeline uses Python's `logging` module with a configured format: `%(asctime)s [%(levelname)s] %(name)s: %(message)s`. Log levels:
+- `INFO`: Window progress, trade counts, ETAs, bar emission summaries
+- `DEBUG`: API request/response details, pagination steps, accumulator state
+- `WARNING`: Rate limit hits, no-progress pagination stops, gap detection
+- `ERROR`: API failures after retry exhaustion, DB connection errors
+
+For daemon mode, logs go to stderr by default. A `--log-level` CLI flag controls verbosity. Structured JSON logging (for production log aggregation) is deferred to v2.
 
 ---
 
@@ -62,7 +139,7 @@ These sample when the imbalance of signed trades exceeds an expected value estim
 | **Volume imbalance bars (VIB)** | Cumulative signed volume | Expected volume imbalance |
 | **Dollar imbalance bars (DIB)** | Cumulative signed dollar volume | Expected dollar imbalance |
 
-**Implementation detail:** Trade sign is determined by the tick rule — if price > previous price, it's a buy (+1); if price < previous price, it's a sell (-1); if equal, carry forward the previous sign.
+**Implementation detail:** Trade sign is `+1` (buy) or `-1` (sell). When the exchange provides the taker side (Coinbase, Binance), use it directly via `Trade.sign()`. For sources without side information, fall back to the tick rule: if price > previous price → buy (+1); if price < previous price → sell (-1); if equal → carry forward previous sign. See Design Decision #4.
 
 ### Run Bars
 Similar to imbalance bars, but instead of tracking cumulative imbalance, they track the longest *run* of consecutive buys or sells. A long run suggests sequential informed trading.
@@ -226,14 +303,16 @@ arcana/
 ### Core
 | Package | Purpose |
 |---|---|
-| `pandas` | DataFrames for bar data, trade batching |
-| `numpy` | Numerical computation (EWMA, statistics) |
 | `psycopg[binary]` | PostgreSQL/TimescaleDB driver (psycopg 3) |
-| `sqlalchemy` | ORM + migration support |
-| `httpx` | Async HTTP client for Coinbase REST API |
+| `httpx` | HTTP client for Coinbase REST API |
 | `click` | CLI framework |
 | `pydantic` | Configuration validation, data models |
-| `tomli` | TOML config file parsing (stdlib in 3.11+) |
+
+### Optional (`pip install arcana[analysis]`)
+| Package | Purpose |
+|---|---|
+| `pandas` | DataFrames for bar export, feature engineering |
+| `numpy` | Numerical computation (EWMA, statistics) |
 
 ### Dev
 | Package | Purpose |
@@ -257,7 +336,7 @@ CREATE TABLE raw_trades (
     pair         TEXT          NOT NULL,    -- 'ETH-USD'
     price        NUMERIC       NOT NULL,
     size         NUMERIC       NOT NULL,
-    side         TEXT,                      -- 'buy', 'sell', or NULL
+    side         TEXT          NOT NULL,    -- 'buy', 'sell', or 'unknown'
     UNIQUE (source, trade_id)
 );
 
@@ -341,9 +420,9 @@ arcana status                                     # trade count, bar counts, las
 
 **Ingestion Pipeline:**
 - [x] Bulk ingestion command: `arcana ingest ETH-USD --since 2025-01-01`
-  - Backfills raw trades from `--since` date to present via forward time-window walk
-  - Binary subdivision pagination: automatically splits busy windows to capture all trades
-  - Writes to `raw_trades` table in batches
+  - Backfills raw trades from `--since` date to present via forward 15-minute window walk
+  - Backward sequential pagination: pages backward through each window to capture all trades (O(N/300) API calls)
+  - Writes to `raw_trades` table in batches of 1000
   - Resumable — on restart, picks up from `MAX(timestamp)` for the pair
   - Progress logging (trades ingested, time range covered, ETA)
 - [x] Daemon mode: `arcana run ETH-USD`
@@ -375,7 +454,7 @@ arcana status                                     # trade count, bar counts, las
 - [ ] CLI: `arcana bars build` — wire bar builders to CLI command
 - [x] Unit tests for bar construction (22 tests with hand-computed expected values)
 - [x] Tests for pipeline (backfill, resume, checkpointing, graceful shutdown)
-- [x] Tests for ingestion (fetch, pagination, binary subdivision, retry — 16 tests)
+- [x] Tests for ingestion (fetch, backward pagination, dedup, retry — 16 tests)
 - [ ] README with quickstart
 
 ### Phase 2 — Information-Driven Bars
@@ -463,27 +542,28 @@ GET /api/v3/brokerage/market/products/{product_id}/ticker
 ### Ingestion Strategy
 
 **Bulk backfill** (`arcana ingest ETH-USD --since 2025-01-01`):
-Walk forward through time in 1-hour windows:
+Walk forward through time in 15-minute windows:
 ```
-Window 1: start=Jan 1 00:00, end=Jan 1 01:00 → fetch trades
-Window 2: start=Jan 1 01:00, end=Jan 1 02:00 → fetch trades
+Window 1: start=Jan 1 00:00, end=Jan 1 00:15 → fetch all trades
+Window 2: start=Jan 1 00:15, end=Jan 1 00:30 → fetch all trades
 ...
 Window N: start=today 13:00, end=now → done
 ```
-Each batch of trades is committed to the DB. On crash, resume from `MAX(timestamp)`.
+Each batch of trades is committed to the DB in groups of 1000. On crash, resume from `MAX(timestamp)`.
 
-**Binary subdivision pagination:** The API returns at most 300 trades per request. For busy trading periods (2000+ trades/hour), `fetch_all_trades()` automatically splits the window in half and recurses until every sub-window fits within the 300-trade limit. Trades at subdivision boundaries are deduplicated by `trade_id`. Max recursion depth of 10 (~3.5s minimum window) prevents infinite loops.
+**Backward sequential pagination:** The API returns at most 300 trades per request (newest first). For busy windows (300+ trades per 15 minutes), `fetch_all_trades()` pages backward from `end`:
 
 ```
-fetch_all_trades(14:00, 15:00)
-  → API returns 300 (at limit) → subdivide
-  ├── fetch_all_trades(14:00, 14:30) → 180 trades ✓
-  └── fetch_all_trades(14:30, 15:00)
-      → API returns 300 (at limit) → subdivide
-      ├── fetch_all_trades(14:30, 14:45) → 140 trades ✓
-      └── fetch_all_trades(14:45, 15:00) → 160 trades ✓
-  → merge & dedup → 480 complete trades
+fetch_all_trades(14:00, 14:15)       # ~600 trades in this window
+  Page 1: fetch(14:00, 14:15) → 300 trades (14:07–14:15)
+  Page 2: fetch(14:00, 14:07) → 300 trades (14:01–14:07)
+  Page 3: fetch(14:00, 14:01) → 42 trades  (14:00–14:01) ← under limit, done
+  → merge & dedup by trade_id → 642 trades, sorted ascending
 ```
+
+Each page shifts `current_end` to the earliest timestamp seen, walking backward until a page returns fewer than 300 trades (meaning we've captured everything down to `start`). This is O(N/300) API calls — the theoretical minimum, with no wasted probe calls.
+
+**Rate limiting:** 0.12s delay between API calls (~8 req/s, under the 10 req/s public limit). A 15-minute window with ~6000 trades needs ~20 API calls × 0.12s = ~2.4s per window.
 
 **Daemon mode** (`arcana run ETH-USD`):
 ```

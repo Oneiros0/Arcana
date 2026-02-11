@@ -52,7 +52,10 @@ class TestIngestBackfill:
         db.insert_trades.return_value = 10
 
         since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
-        total = ingest_backfill(source, db, "ETH-USD", since)
+        # Use a window large enough to cover since→now in a single window
+        total = ingest_backfill(
+            source, db, "ETH-USD", since, window=timedelta(days=7),
+        )
 
         assert total == 10
         assert db.insert_trades.called

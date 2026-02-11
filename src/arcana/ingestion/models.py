@@ -19,7 +19,7 @@ class Trade(BaseModel):
     pair: str = Field(description="Trading pair, e.g. 'ETH-USD'")
     price: Decimal = Field(description="Execution price in quote currency")
     size: Decimal = Field(description="Execution size in base currency")
-    side: str = Field(description="Taker side: 'buy' or 'sell'")
+    side: str = Field(description="Taker side: 'buy', 'sell', or 'unknown'")
 
     @property
     def dollar_volume(self) -> Decimal:
@@ -31,7 +31,16 @@ class Trade(BaseModel):
         return self.side == "buy"
 
     def sign(self) -> int:
-        """Trade sign for tick rule: +1 for buy, -1 for sell."""
-        return 1 if self.is_buy else -1
+        """Trade sign: +1 for buy, -1 for sell, 0 for unknown.
+
+        When side is 'unknown', returns 0 to signal that downstream
+        consumers (e.g. imbalance bar builders) should apply the tick
+        rule to infer direction from price movement.
+        """
+        if self.side == "buy":
+            return 1
+        elif self.side == "sell":
+            return -1
+        return 0
 
     model_config = {"frozen": True}
