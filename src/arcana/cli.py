@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import click
 
-from arcana.config import ArcanaConfig, DatabaseConfig
+from arcana.config import DatabaseConfig
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.pipeline import DAEMON_INTERVAL, ingest_backfill, run_daemon
 from arcana.storage.database import Database
@@ -361,7 +361,6 @@ def swarm_status(
                 rows = cur.fetchall()
 
             total = db_conn.get_trade_count(pair)
-            first_ts = db_conn.get_last_timestamp(pair)  # will use for coverage
 
             click.echo(f"Swarm status: {pair}")
             click.echo(f"  Total trades: {total:,}")
