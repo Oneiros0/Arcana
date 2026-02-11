@@ -20,8 +20,7 @@ The goal: provide researchers and quant developers with properly structured bars
 | **Bar builder recovery** | Not started | DB methods exist, orchestration not connected |
 | **Information-driven bars** | Not started | TIB, VIB, DIB, TRB, VRB, DRB (Phase 2) |
 
-**Codebase:** ~1,900 lines source / ~1,250 lines test / 87 tests passing
-**Git:** 12 commits on `claude/plan-trading-pipeline-aNfsS`
+**Codebase:** 2,024 lines source / 1,268 lines test / 87 tests passing
 
 ---
 
@@ -213,7 +212,7 @@ Trade:
   timestamp: datetime (UTC)
   price: Decimal
   size: Decimal          # volume in base currency
-  side: str              # "buy" or "sell" (if available from exchange)
+  side: str              # "buy", "sell", or "unknown"
   trade_id: str          # exchange-specific trade ID
   source: str            # "coinbase", "binance", etc.
   pair: str              # "ETH-USD"
@@ -249,16 +248,16 @@ arcana/
 ├── src/
 │   └── arcana/
 │       ├── __init__.py               # Package init, version 0.1.0
-│       ├── cli.py                    # Click CLI entry point (464 lines)
+│       ├── cli.py                    # Click CLI entry point (493 lines)
 │       ├── config.py                 # DatabaseConfig, ArcanaConfig (27 lines)
-│       ├── pipeline.py              # ingest_backfill, run_daemon, GracefulShutdown (242 lines)
-│       ├── swarm.py                 # Parallel backfill: split_range, compose gen, validation (274 lines)
+│       ├── pipeline.py              # ingest_backfill, run_daemon, GracefulShutdown (244 lines)
+│       ├── swarm.py                 # Parallel backfill: split_range, compose gen, validation (272 lines)
 │       │
 │       ├── ingestion/
 │       │   ├── __init__.py
 │       │   ├── base.py              # DataSource ABC (fetch_trades, fetch_all_trades)
-│       │   ├── coinbase.py          # Coinbase Advanced Trade API client (264 lines)
-│       │   └── models.py            # Trade Pydantic model (37 lines)
+│       │   ├── coinbase.py          # Coinbase Advanced Trade API client (213 lines)
+│       │   └── models.py            # Trade Pydantic model (46 lines)
 │       │
 │       ├── bars/
 │       │   ├── __init__.py           # Exports all bar types
@@ -270,7 +269,7 @@ arcana/
 │       │
 │       └── storage/
 │           ├── __init__.py
-│           └── database.py          # TimescaleDB: schema, trade/bar CRUD (331 lines)
+│           └── database.py          # TimescaleDB: schema, trade/bar CRUD (330 lines)
 │
 ├── scripts/
 │   ├── explore_coinbase.py          # API response analysis (220 lines)
@@ -288,7 +287,7 @@ arcana/
 │   │   └── test_models.py           # 6 tests
 │   └── test_bars/
 │       ├── test_base.py             # 6 tests (Accumulator, Bar model)
-│       └── test_standard.py         # 22 tests (all 4 bar types)
+│       └── test_standard.py         # 21 tests (all 4 bar types)
 │
 ├── Dockerfile                       # Python 3.11-slim, pip install, ENTRYPOINT arcana
 ├── pyproject.toml                   # Project metadata, dependencies, build config
@@ -325,7 +324,6 @@ arcana/
 | `pytest-cov` | Coverage reporting |
 | `ruff` | Linting + formatting |
 | `mypy` | Static type checking |
-| `pre-commit` | Git hooks for lint/format |
 
 ---
 
@@ -378,11 +376,10 @@ SELECT create_hypertable('bars', 'time_start');
 ```bash
 # Initialize database (run migrations)
 arcana db init
-arcana db status
 
 # Ingest raw trades
-arcana ingest coinbase ETH-USD                    # fetch latest trades
-arcana ingest coinbase ETH-USD --since 2025-01-01 # backfill from date
+arcana ingest ETH-USD --since 2025-01-01          # backfill from date
+arcana ingest ETH-USD --since 2025-01-01 --until 2025-06-01  # bounded backfill
 
 # Construct bars from stored trades
 arcana bars build --type tick --threshold 500     # tick bars, 500 trades each
@@ -433,7 +430,7 @@ arcana swarm stop --remove-volumes                # tear down + delete data
 **Ingestion Pipeline:**
 - [x] Bulk ingestion command: `arcana ingest ETH-USD --since 2025-01-01`
   - Backfills raw trades from `--since` date to present via forward 15-minute window walk
-  - Backward sequential pagination: pages backward through each window to capture all trades (O(N/300) API calls)
+  - Backward sequential pagination: pages backward through each window to capture all trades (O(N/1000) API calls)
   - Writes to `raw_trades` table in batches of 1000
   - Resumable — on restart, picks up from `MAX(timestamp)` for the pair
   - Progress logging (trades ingested, time range covered, ETA)
@@ -445,7 +442,7 @@ arcana swarm stop --remove-volumes                # tear down + delete data
 
 **Failsafes & Resumability:**
 - [x] Ingestion checkpointing — commit trades to DB in batches (every 1000 trades) so a crash mid-backfill loses at most one batch
-- [x] Duplicate detection — `UNIQUE (source, trade_id)` constraint + `ON CONFLICT DO NOTHING` upserts so re-running ingestion over an overlapping range is safe
+- [x] Duplicate detection — `UNIQUE (source, trade_id, timestamp)` constraint + `ON CONFLICT DO NOTHING` upserts so re-running ingestion over an overlapping range is safe
 - [x] API failure retry — exponential backoff (2s, 4s, 8s, 16s) on HTTP errors, with max 4 retries before halting
 - [x] Daemon heartbeat — logs last successful poll time; on restart, detects gap and backfills missed trades before resuming the poll loop
 - [ ] Bar builder recovery — wire `get_last_bar_time()` + `get_trades_since()` into a bar rebuild routine at startup. The DB methods exist, but the orchestration is not yet connected.
@@ -614,7 +611,8 @@ Every 15 minutes:
 │              │                     │                      │
 │              │  raw_trades table   │                      │
 │              │  UNIQUE(source,     │                      │
-│              │    trade_id)        │                      │
+│              │   trade_id,        │                      │
+│              │   timestamp)       │                      │
 │              │  ON CONFLICT        │                      │
 │              │    DO NOTHING       │                      │
 │              └─────────────────────┘                      │
@@ -623,12 +621,12 @@ Every 15 minutes:
 
 **Why this is safe:**
 
-1. **No write conflicts.** Each worker ingests a disjoint time range. Even if ranges overlap slightly at boundaries, the `UNIQUE(source, trade_id)` constraint with `ON CONFLICT DO NOTHING` makes duplicate writes harmless.
+1. **No write conflicts.** Each worker ingests a disjoint time range. Even if ranges overlap slightly at boundaries, the `UNIQUE(source, trade_id, timestamp)` constraint with `ON CONFLICT DO NOTHING` makes duplicate writes harmless.
 2. **No read coordination.** Workers don't need to know about each other. Each one runs the standard `ingest_backfill()` flow with its own `since`/`until` range.
 3. **Resumable per worker.** If a container crashes, restart it — it resumes from `MAX(timestamp)` within its assigned range, same as single-process mode.
 4. **Database handles concurrency.** PostgreSQL/TimescaleDB is designed for concurrent writers. The hypertable partitions by timestamp, so workers writing to different time ranges hit different chunks with minimal lock contention.
 
-**Required code change:** Add `--until` flag to `arcana ingest` so workers can be bounded:
+**Bounded ingestion:** The `--until` flag on `arcana ingest` caps the end time so workers exit when their range is complete:
 ```bash
 # Worker for January 2023
 arcana ingest ETH-USD --since 2023-01-01 --until 2023-02-01
@@ -636,8 +634,6 @@ arcana ingest ETH-USD --since 2023-01-01 --until 2023-02-01
 # Worker for February 2023
 arcana ingest ETH-USD --since 2023-02-01 --until 2023-03-01
 ```
-
-Currently `ingest_backfill()` always runs to `datetime.now()`. The `--until` flag would cap the end time, allowing the worker to exit when its range is complete.
 
 **Estimated speedup:**
 
