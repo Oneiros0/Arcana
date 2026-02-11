@@ -8,6 +8,23 @@ The goal: provide researchers and quant developers with properly structured bars
 
 ---
 
+## Current Status (2026-02-11)
+
+| Component | Status | Details |
+|---|---|---|
+| **Ingestion pipeline** | Done | Backfill + daemon mode, binary subdivision pagination, graceful shutdown |
+| **Coinbase API client** | Done | Advanced Trade API, retry with backoff, rate limiting |
+| **Database layer** | Done | raw_trades + bars tables, upsert, trade/bar CRUD |
+| **Standard bar builders** | Done | Time, tick, volume, dollar — all with OHLCV + VWAP |
+| **Bar CLI command** | Not started | `arcana bars build` needs wiring |
+| **Bar builder recovery** | Not started | DB methods exist, orchestration not connected |
+| **Information-driven bars** | Not started | TIB, VIB, DIB, TRB, VRB, DRB (Phase 2) |
+
+**Codebase:** 1,489 lines source / 1,036 lines test / 64 tests passing
+**Git:** 10 commits on `claude/plan-trading-pipeline-aNfsS`
+
+---
+
 ## Consolidated Design Decisions
 
 | Decision | Choice | Rationale |
@@ -126,71 +143,80 @@ Trade:
 ```
 
 All data sources implement a `DataSource` abstract base class with:
-- `fetch_trades(pair, start, end) -> list[Trade]` — historical trades
+- `fetch_trades(pair, start, end, limit) -> list[Trade]` — single-request fetch
+- `fetch_all_trades(pair, start, end) -> list[Trade]` — complete fetch with automatic pagination
 - `get_supported_pairs() -> list[str]` — available trading pairs
 
 **Bar Construction Layer** — Takes a sequence of `Trade` objects and produces bars. All bar builders implement a `BarBuilder` abstract base class with:
-- `process_trades(trades: list[Trade]) -> list[Bar]` — stateful; maintains internal accumulators across calls
-- `reset()` — clear internal state
+- `process_trade(trade: Trade) -> Bar | None` — process one trade, return bar if threshold met
+- `process_trades(trades: list[Trade]) -> list[Bar]` — stateful batch processing; maintains internal accumulators across calls
+- `flush() -> Bar | None` — emit in-progress bar at end of data or shutdown
 - Configurable thresholds (tick count, volume, dollar amount, EWMA window)
+- `Accumulator` tracks running OHLCV state (open, high, low, close, volume, dollar volume, VWAP numerator, tick count) without storing individual trades
 
 **Storage Layer** — Manages TimescaleDB connections, schema migrations, and read/write:
 - Raw trades stored in a `raw_trades` hypertable (partitioned by time)
-- Bars stored in separate hypertables per bar type
+- Bars stored in `bars` table with upsert on `(bar_type, source, pair, time_start)`
 - Handles deduplication (trade IDs), upserts, and compression policies
+- `get_trades_since()` loads raw trades for bar construction
+- `get_last_bar_time()` provides resume points for incremental bar building
 
 ---
 
 ## Project Structure
 
+Files marked with `*` are planned but not yet created.
+
 ```
 arcana/
 ├── src/
 │   └── arcana/
-│       ├── __init__.py
-│       ├── cli.py                    # Click CLI entry point
-│       ├── config.py                 # Configuration (TOML-based)
+│       ├── __init__.py               # Package init, version 0.1.0
+│       ├── cli.py                    # Click CLI entry point (190 lines)
+│       ├── config.py                 # DatabaseConfig, ArcanaConfig (27 lines)
+│       ├── pipeline.py              # ingest_backfill, run_daemon, GracefulShutdown (242 lines)
 │       │
 │       ├── ingestion/
 │       │   ├── __init__.py
-│       │   ├── base.py              # DataSource ABC
-│       │   ├── coinbase.py          # Coinbase Advanced Trade client
-│       │   └── models.py           # Trade dataclass
+│       │   ├── base.py              # DataSource ABC (fetch_trades, fetch_all_trades)
+│       │   ├── coinbase.py          # Coinbase Advanced Trade API client (264 lines)
+│       │   └── models.py            # Trade Pydantic model (37 lines)
 │       │
 │       ├── bars/
-│       │   ├── __init__.py
-│       │   ├── base.py              # BarBuilder ABC, Bar dataclass
-│       │   ├── standard.py          # TimeBar, TickBar, VolumeBar, DollarBar
-│       │   ├── imbalance.py         # TickImbalanceBar, VolumeImbalanceBar, DollarImbalanceBar
-│       │   ├── runs.py              # TickRunBar, VolumeRunBar, DollarRunBar
-│       │   └── utils.py            # EWMA, tick rule, auxiliary computation
+│       │   ├── __init__.py           # Exports all bar types
+│       │   ├── base.py              # Bar model, Accumulator, BarBuilder ABC (180 lines)
+│       │   ├── standard.py          # TickBar, VolumeBar, DollarBar, TimeBar (130 lines)
+│       │   ├── imbalance.py *       # TickImbalanceBar, VolumeImbalanceBar, DollarImbalanceBar
+│       │   ├── runs.py *            # TickRunBar, VolumeRunBar, DollarRunBar
+│       │   └── utils.py *           # EWMA estimator, tick rule
 │       │
 │       └── storage/
 │           ├── __init__.py
-│           ├── database.py          # TimescaleDB connection & migrations
-│           ├── trades.py            # Raw trade read/write
-│           └── bars.py              # Bar read/write
+│           └── database.py          # TimescaleDB: schema, trade/bar CRUD (331 lines)
+│
+├── scripts/
+│   ├── explore_coinbase.py          # API response analysis (220 lines)
+│   ├── query_trades.py              # DB trade analysis & gap detection (241 lines)
+│   └── clear_trades.py              # Delete trades for re-ingestion (118 lines)
 │
 ├── tests/
-│   ├── conftest.py
+│   ├── fixtures/
+│   │   └── sample_advanced_trade_response.json
+│   ├── test_cli.py                  # 7 tests
+│   ├── test_pipeline.py             # 7 tests
 │   ├── test_ingestion/
-│   │   ├── test_coinbase.py
-│   │   └── test_models.py
-│   ├── test_bars/
-│   │   ├── test_standard.py
-│   │   ├── test_imbalance.py
-│   │   ├── test_runs.py
-│   │   └── test_utils.py
-│   └── test_storage/
-│       └── test_database.py
+│   │   ├── test_coinbase.py         # 16 tests (fetch, pagination, retry)
+│   │   └── test_models.py           # 6 tests
+│   └── test_bars/
+│       ├── test_base.py             # 6 tests (Accumulator, Bar model)
+│       └── test_standard.py         # 22 tests (all 4 bar types)
 │
 ├── pyproject.toml                   # Project metadata, dependencies, build config
-├── LICENSE                          # Apache 2.0
 ├── README.md
 ├── PLAN.md                          # This document
 └── .github/
     └── workflows/
-        └── ci.yml                   # GitHub Actions: lint, test, type-check
+        └── ci.yml *                 # GitHub Actions: lint, test, type-check
 ```
 
 ---
@@ -316,6 +342,7 @@ arcana status                                     # trade count, bar counts, las
 **Ingestion Pipeline:**
 - [x] Bulk ingestion command: `arcana ingest ETH-USD --since 2025-01-01`
   - Backfills raw trades from `--since` date to present via forward time-window walk
+  - Binary subdivision pagination: automatically splits busy windows to capture all trades
   - Writes to `raw_trades` table in batches
   - Resumable — on restart, picks up from `MAX(timestamp)` for the pair
   - Progress logging (trades ingested, time range covered, ETA)
@@ -330,17 +357,25 @@ arcana status                                     # trade count, bar counts, las
 - [x] Duplicate detection — `UNIQUE (source, trade_id)` constraint + `ON CONFLICT DO NOTHING` upserts so re-running ingestion over an overlapping range is safe
 - [x] API failure retry — exponential backoff (2s, 4s, 8s, 16s) on HTTP errors, with max 4 retries before halting
 - [x] Daemon heartbeat — logs last successful poll time; on restart, detects gap and backfills missed trades before resuming the poll loop
-- [ ] Bar builder recovery — on startup, query last completed bar's `time_end`, re-fetch raw trades after that point, rebuild accumulator state, then continue. No persisted builder state needed.
+- [ ] Bar builder recovery — wire `get_last_bar_time()` + `get_trades_since()` into a bar rebuild routine at startup. The DB methods exist, but the orchestration is not yet connected.
 - [x] Graceful shutdown — handles SIGINT/SIGTERM, finishes current batch and commits before exiting
 
 **Standard Bar Builders:**
-- [ ] Standard bar builders (time, tick, volume, dollar)
-- [ ] Bar auxiliary info computation (OHLCV, VWAP, tick count, time span)
+- [x] `Bar` model (Pydantic, frozen) — OHLCV, VWAP, tick count, dollar volume, time span, metadata
+- [x] `Accumulator` — running OHLCV state tracker, computes VWAP from price*volume numerator
+- [x] `BarBuilder` ABC — `process_trade()`, `process_trades()`, `flush()`, stateful across batches
+- [x] `TickBarBuilder` — emit every N trades
+- [x] `VolumeBarBuilder` — emit every V base-currency volume
+- [x] `DollarBarBuilder` — emit every D notional dollars (Prado's preferred)
+- [x] `TimeBarBuilder` — clock-aligned buckets, empty gaps skipped
+- [x] Bar storage — `insert_bars()` upsert, `get_last_bar_time()`, `get_bar_count()`, `get_trades_since()`
 
 **CLI & Tests:**
 - [x] CLI: `arcana db init`, `arcana ingest`, `arcana run`, `arcana status`
-- [ ] Unit tests for bar construction (known inputs -> expected outputs)
+- [ ] CLI: `arcana bars build` — wire bar builders to CLI command
+- [x] Unit tests for bar construction (22 tests with hand-computed expected values)
 - [x] Tests for pipeline (backfill, resume, checkpointing, graceful shutdown)
+- [x] Tests for ingestion (fetch, pagination, binary subdivision, retry — 16 tests)
 - [ ] README with quickstart
 
 ### Phase 2 — Information-Driven Bars
@@ -436,6 +471,19 @@ Window 2: start=Jan 1 01:00, end=Jan 1 02:00 → fetch trades
 Window N: start=today 13:00, end=now → done
 ```
 Each batch of trades is committed to the DB. On crash, resume from `MAX(timestamp)`.
+
+**Binary subdivision pagination:** The API returns at most 300 trades per request. For busy trading periods (2000+ trades/hour), `fetch_all_trades()` automatically splits the window in half and recurses until every sub-window fits within the 300-trade limit. Trades at subdivision boundaries are deduplicated by `trade_id`. Max recursion depth of 10 (~3.5s minimum window) prevents infinite loops.
+
+```
+fetch_all_trades(14:00, 15:00)
+  → API returns 300 (at limit) → subdivide
+  ├── fetch_all_trades(14:00, 14:30) → 180 trades ✓
+  └── fetch_all_trades(14:30, 15:00)
+      → API returns 300 (at limit) → subdivide
+      ├── fetch_all_trades(14:30, 14:45) → 140 trades ✓
+      └── fetch_all_trades(14:45, 15:00) → 160 trades ✓
+  → merge & dedup → 480 complete trades
+```
 
 **Daemon mode** (`arcana run ETH-USD`):
 ```
