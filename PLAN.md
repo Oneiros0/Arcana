@@ -649,6 +649,11 @@ On a **single host**, all workers share one public IP. The aggregate rate is alw
 
 True parallel speedup requires **multiple public IPs** — either separate machines, cloud VMs, or proxy rotation. On a single machine, the swarm's value is work partitioning and per-worker resumability, not API throughput.
 
+When using separate IPs (VPN, proxy rotation, or separate machines), pass `--multi-ip` to skip rate-delay scaling — each worker keeps the default 0.12s delay (~8 req/s per worker):
+```bash
+arcana swarm launch ETH-USD --since 2022-01-01 --workers 12 --multi-ip
+```
+
 **Docker Compose sketch:**
 ```yaml
 services:
@@ -712,6 +717,7 @@ Key options:
 | `--output` | `docker-compose.swarm.yml` | Output file path |
 | `--image` | `arcana:latest` | Docker image for workers |
 | `--password` | `arcana` | Database password |
+| `--multi-ip` | off | Workers have separate IPs (VPN/proxy); skip rate-delay scaling |
 | `--up` | off | Auto-start containers after generating |
 
 **Step 3 — Start the swarm:**
