@@ -20,8 +20,8 @@ The goal: provide researchers and quant developers with properly structured bars
 | **Bar builder recovery** | Not started | DB methods exist, orchestration not connected |
 | **Information-driven bars** | Not started | TIB, VIB, DIB, TRB, VRB, DRB (Phase 2) |
 
-**Codebase:** 1,489 lines source / 1,036 lines test / 64 tests passing
-**Git:** 10 commits on `claude/plan-trading-pipeline-aNfsS`
+**Codebase:** 1,456 lines source / 998 lines test / 63 tests passing
+**Git:** 12 commits on `claude/plan-trading-pipeline-aNfsS`
 
 ---
 
@@ -303,14 +303,16 @@ arcana/
 ### Core
 | Package | Purpose |
 |---|---|
-| `pandas` | DataFrames for bar data, trade batching |
-| `numpy` | Numerical computation (EWMA, statistics) |
 | `psycopg[binary]` | PostgreSQL/TimescaleDB driver (psycopg 3) |
-| `sqlalchemy` | ORM + migration support |
-| `httpx` | Async HTTP client for Coinbase REST API |
+| `httpx` | HTTP client for Coinbase REST API |
 | `click` | CLI framework |
 | `pydantic` | Configuration validation, data models |
-| `tomli` | TOML config file parsing (stdlib in 3.11+) |
+
+### Optional (`pip install arcana[analysis]`)
+| Package | Purpose |
+|---|---|
+| `pandas` | DataFrames for bar export, feature engineering |
+| `numpy` | Numerical computation (EWMA, statistics) |
 
 ### Dev
 | Package | Purpose |
@@ -334,7 +336,7 @@ CREATE TABLE raw_trades (
     pair         TEXT          NOT NULL,    -- 'ETH-USD'
     price        NUMERIC       NOT NULL,
     size         NUMERIC       NOT NULL,
-    side         TEXT,                      -- 'buy', 'sell', or NULL
+    side         TEXT          NOT NULL,    -- 'buy', 'sell', or 'unknown'
     UNIQUE (source, trade_id)
 );
 

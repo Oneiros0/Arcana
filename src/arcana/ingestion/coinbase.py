@@ -12,7 +12,7 @@ Key advantages over the Exchange API:
 
 import logging
 import time as time_mod
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -194,59 +194,6 @@ class CoinbaseSource(DataSource):
                 end.strftime("%Y-%m-%d %H:%M"),
                 len(all_trades),
             )
-
-        return sorted(all_trades, key=lambda t: t.timestamp)
-
-    def fetch_trades_window(
-        self,
-        pair: str,
-        start: datetime,
-        end: datetime,
-        window: timedelta = timedelta(hours=1),
-    ) -> list[Trade]:
-        """Fetch all trades in a range by walking forward through time windows.
-
-        This is the primary method for bulk backfill. It splits the range
-        into windows and fetches each one with full pagination, yielding
-        a complete set of trades.
-
-        Args:
-            pair: Trading pair, e.g. 'ETH-USD'.
-            start: Backfill start time (UTC).
-            end: Backfill end time (UTC).
-            window: Size of each time window to query.
-
-        Returns:
-            List of all Trade objects in the range, ascending by timestamp.
-        """
-        all_trades: list[Trade] = []
-        current = start
-        total_windows = max(1, int((end - start) / window) + 1)
-        completed = 0
-
-        while current < end:
-            window_end = min(current + window, end)
-
-            trades = self.fetch_all_trades(
-                pair=pair,
-                start=current,
-                end=window_end,
-            )
-            all_trades.extend(trades)
-            completed += 1
-
-            logger.info(
-                "Window %d/%d: %s → %s | %d trades (total: %d)",
-                completed,
-                total_windows,
-                current.strftime("%Y-%m-%d %H:%M"),
-                window_end.strftime("%Y-%m-%d %H:%M"),
-                len(trades),
-                len(all_trades),
-            )
-
-            current = window_end
-            time_mod.sleep(RATE_LIMIT_DELAY)
 
         return sorted(all_trades, key=lambda t: t.timestamp)
 
