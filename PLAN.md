@@ -20,7 +20,7 @@ The goal: provide researchers and quant developers with properly structured bars
 | **Bar builder recovery** | Not started | DB methods exist, orchestration not connected |
 | **Information-driven bars** | Not started | TIB, VIB, DIB, TRB, VRB, DRB (Phase 2) |
 
-**Codebase:** 1,456 lines source / 998 lines test / 63 tests passing
+**Codebase:** ~1,900 lines source / ~1,250 lines test / 87 tests passing
 **Git:** 12 commits on `claude/plan-trading-pipeline-aNfsS`
 
 ---
@@ -249,9 +249,10 @@ arcana/
 ├── src/
 │   └── arcana/
 │       ├── __init__.py               # Package init, version 0.1.0
-│       ├── cli.py                    # Click CLI entry point (190 lines)
+│       ├── cli.py                    # Click CLI entry point (464 lines)
 │       ├── config.py                 # DatabaseConfig, ArcanaConfig (27 lines)
 │       ├── pipeline.py              # ingest_backfill, run_daemon, GracefulShutdown (242 lines)
+│       ├── swarm.py                 # Parallel backfill: split_range, compose gen, validation (274 lines)
 │       │
 │       ├── ingestion/
 │       │   ├── __init__.py
@@ -281,6 +282,7 @@ arcana/
 │   │   └── sample_advanced_trade_response.json
 │   ├── test_cli.py                  # 7 tests
 │   ├── test_pipeline.py             # 7 tests
+│   ├── test_swarm.py                # 24 tests (split_range, compose gen, CLI)
 │   ├── test_ingestion/
 │   │   ├── test_coinbase.py         # 16 tests (fetch, pagination, retry)
 │   │   └── test_models.py           # 6 tests
@@ -288,6 +290,7 @@ arcana/
 │       ├── test_base.py             # 6 tests (Accumulator, Bar model)
 │       └── test_standard.py         # 22 tests (all 4 bar types)
 │
+├── Dockerfile                       # Python 3.11-slim, pip install, ENTRYPOINT arcana
 ├── pyproject.toml                   # Project metadata, dependencies, build config
 ├── README.md
 ├── PLAN.md                          # This document
@@ -307,6 +310,7 @@ arcana/
 | `httpx` | HTTP client for Coinbase REST API |
 | `click` | CLI framework |
 | `pydantic` | Configuration validation, data models |
+| `pyyaml` | Docker Compose YAML generation (swarm module) |
 
 ### Optional (`pip install arcana[analysis]`)
 | Package | Purpose |
@@ -402,6 +406,14 @@ arcana pipeline schedule --interval 15m           # recurring 15-min batch
 
 # Status and diagnostics
 arcana status                                     # trade count, bar counts, last update
+
+# Parallel backfill via Docker
+arcana swarm launch ETH-USD --since 2022-01-01 --workers 24   # generate compose file
+arcana swarm launch ETH-USD --since 2022-01-01 --workers 24 --up  # generate + start
+arcana swarm status ETH-USD --password arcana     # per-month trade counts
+arcana swarm validate ETH-USD --since 2022-01-01 --password arcana  # gap detection
+arcana swarm stop                                 # tear down containers
+arcana swarm stop --remove-volumes                # tear down + delete data
 ```
 
 ---
@@ -673,7 +685,85 @@ volumes:
   arcana_data:
 ```
 
-In practice, a `generate_compose.py` script would produce the full compose file for any date range, automatically splitting into monthly workers. The Dockerfile is straightforward — `pip install .` into a Python 3.11 image.
+In practice, `arcana swarm launch` generates the full compose file for any date range, automatically splitting into equal-duration worker chunks. The Dockerfile is straightforward — `pip install .` into a Python 3.11 image.
+
+### How to Run the Swarm
+
+**Prerequisites:**
+- Docker Desktop (or Docker Engine + Docker Compose plugin) installed and running
+- The Arcana repository cloned locally
+- No other service using port 5432 (the swarm spins up its own TimescaleDB)
+
+**Step 1 — Build the Docker image:**
+```bash
+docker build -t arcana:latest .
+```
+This packages the Arcana source code into a container image. Re-run this step after any code changes.
+
+**Step 2 — Generate the compose file and review the plan:**
+```bash
+arcana swarm launch ETH-USD --since 2022-01-01 --until 2024-01-01 --workers 24
+```
+This prints a worker assignment table (which worker covers which date range) and writes `docker-compose.swarm.yml`. It does **not** start containers yet — review the plan first.
+
+Key options:
+| Flag | Default | Description |
+|---|---|---|
+| `--workers` | 12 | Number of parallel containers |
+| `--until` | now | End of backfill range |
+| `--output` | `docker-compose.swarm.yml` | Output file path |
+| `--image` | `arcana:latest` | Docker image for workers |
+| `--password` | `arcana` | Database password |
+| `--up` | off | Auto-start containers after generating |
+
+**Step 3 — Start the swarm:**
+```bash
+docker compose -f docker-compose.swarm.yml up -d
+```
+Or combine steps 2 and 3 with `--up`:
+```bash
+arcana swarm launch ETH-USD --since 2022-01-01 --until 2024-01-01 --workers 24 --up
+```
+
+**Step 4 — Monitor progress:**
+```bash
+# Per-month trade counts from the swarm's database
+arcana swarm status ETH-USD --password arcana
+
+# Watch container health and restarts
+docker compose -f docker-compose.swarm.yml ps
+
+# Stream worker logs (all workers)
+docker compose -f docker-compose.swarm.yml logs -f
+
+# Stream logs for a single worker
+docker compose -f docker-compose.swarm.yml logs -f worker-00-20220101-20220131
+```
+
+**Step 5 — Validate coverage after completion:**
+```bash
+arcana swarm validate ETH-USD --since 2022-01-01 --until 2024-01-01 --password arcana
+```
+This scans the database for gaps (days with missing trades) and reports them. A clean run shows "No gaps detected. Coverage is complete."
+
+**Step 6 — Stop the swarm:**
+```bash
+# Stop containers, keep the data volume
+arcana swarm stop
+
+# Stop containers AND delete the data volume
+arcana swarm stop --remove-volumes
+```
+
+**Troubleshooting:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `pull access denied for arcana` | Image not built locally | Run `docker build -t arcana:latest .` |
+| `swarm status` shows 0 trades | Password mismatch (default for `swarm status` vs compose DB) | Pass `--password arcana` to status/validate commands |
+| Worker stuck in restart loop | API rate limit or DB connection failure | Check logs: `docker compose -f docker-compose.swarm.yml logs worker-XX-...` |
+| Port 5432 already in use | Local PostgreSQL is running | Stop it (`brew services stop postgresql` / `sudo systemctl stop postgresql`) or use `--port 5433` |
+| Workers exit immediately | `--since` after `--until` or invalid pair | Check compose file command args |
 
 **Storage estimate for 4-year backfill:**
 
@@ -696,12 +786,17 @@ SELECT add_compression_policy('raw_trades', INTERVAL '7 days');
 ```
 
 **Implementation checklist:**
-- [ ] Add `--until` flag to `arcana ingest` CLI and `ingest_backfill()`
-- [ ] Add `ARCANA_DB_HOST` / `ARCANA_DB_*` environment variable support to CLI
-- [ ] Create `Dockerfile`
-- [ ] Create `generate_compose.py` script (takes date range, outputs docker-compose.yml)
+- [x] Add `--until` flag to `arcana ingest` CLI and `ingest_backfill()`
+- [x] Add `ARCANA_DB_HOST` / `ARCANA_DB_*` environment variable support to CLI
+- [x] Create `Dockerfile`
+- [x] `arcana swarm launch` — generates docker-compose.yml with N workers for any date range
+- [x] `arcana swarm status` — per-month trade count from the swarm DB
+- [x] `arcana swarm validate` — gap detection across the ingested range
+- [x] `arcana swarm stop` — tears down containers (optionally removes volumes)
+- [x] Worker restart policy (on-failure, max 5 attempts, 30s delay)
+- [x] DB healthcheck — workers wait for TimescaleDB to be ready before starting
+- [x] 24 tests covering split_range, compose generation, CLI commands
 - [ ] Add TimescaleDB compression policy to `init_schema()`
-- [ ] Add a post-backfill validation query: count trades per day, flag gaps
 - [ ] Document the parallel backfill workflow in README
 
 ---
