@@ -575,6 +575,135 @@ Every 15 minutes:
   Fetch trades → store → build bars
 ```
 
+### Parallel Backfill via Docker Swarm
+
+**The problem:** Single-process backfill is bottlenecked by the Coinbase rate limit (10 req/s per IP). A 4-year backfill of ETH-USD takes ~15 days serially. The data is time-partitioned and writes are idempotent (upsert), so parallel ingestion across non-overlapping time ranges is safe by construction.
+
+**The approach:** Run N Docker containers, each responsible for a distinct month of historical data. Each container runs the existing `arcana ingest` command with `--since` and a computed `--until` flag. Since the Coinbase public rate limit is **per IP**, each container on a Docker network gets its own rate limit budget.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                  Docker Compose / Swarm                    │
+│                                                          │
+│  ┌─────────────┐  ┌─────────────┐       ┌─────────────┐  │
+│  │ worker-1    │  │ worker-2    │  ...  │ worker-N    │  │
+│  │ 2022-01     │  │ 2022-02     │       │ 2026-01     │  │
+│  │ arcana      │  │ arcana      │       │ arcana      │  │
+│  │  ingest     │  │  ingest     │       │  ingest     │  │
+│  │  --since    │  │  --since    │       │  --since    │  │
+│  │  --until    │  │  --until    │       │  --until    │  │
+│  └──────┬──────┘  └──────┬──────┘       └──────┬──────┘  │
+│         │                │                      │         │
+│         └────────────────┼──────────────────────┘         │
+│                          ▼                                │
+│              ┌─────────────────────┐                      │
+│              │    TimescaleDB      │                      │
+│              │    (shared)         │                      │
+│              │                     │                      │
+│              │  raw_trades table   │                      │
+│              │  UNIQUE(source,     │                      │
+│              │    trade_id)        │                      │
+│              │  ON CONFLICT        │                      │
+│              │    DO NOTHING       │                      │
+│              └─────────────────────┘                      │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Why this is safe:**
+
+1. **No write conflicts.** Each worker ingests a disjoint time range. Even if ranges overlap slightly at boundaries, the `UNIQUE(source, trade_id)` constraint with `ON CONFLICT DO NOTHING` makes duplicate writes harmless.
+2. **No read coordination.** Workers don't need to know about each other. Each one runs the standard `ingest_backfill()` flow with its own `since`/`until` range.
+3. **Resumable per worker.** If a container crashes, restart it — it resumes from `MAX(timestamp)` within its assigned range, same as single-process mode.
+4. **Database handles concurrency.** PostgreSQL/TimescaleDB is designed for concurrent writers. The hypertable partitions by timestamp, so workers writing to different time ranges hit different chunks with minimal lock contention.
+
+**Required code change:** Add `--until` flag to `arcana ingest` so workers can be bounded:
+```bash
+# Worker for January 2023
+arcana ingest ETH-USD --since 2023-01-01 --until 2023-02-01
+
+# Worker for February 2023
+arcana ingest ETH-USD --since 2023-02-01 --until 2023-03-01
+```
+
+Currently `ingest_backfill()` always runs to `datetime.now()`. The `--until` flag would cap the end time, allowing the worker to exit when its range is complete.
+
+**Estimated speedup:**
+
+| Workers | Rate (aggregate) | 4-year ETH-USD | Wall clock |
+|---|---|---|---|
+| 1 (current) | ~8 req/s | ~525M trades | ~15 days |
+| 6 | ~48 req/s | same | ~2.5 days |
+| 12 | ~96 req/s | same | ~1.3 days |
+| 24 | ~192 req/s | same | ~16 hours |
+| 48 (1 per month) | ~384 req/s | same | ~8 hours |
+
+Diminishing returns above ~24 workers because DB write throughput and container overhead become factors. The sweet spot is likely **12–24 workers** for a 4-year backfill, finishing in **1–2 days**.
+
+**Docker Compose sketch:**
+```yaml
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: arcana
+      POSTGRES_USER: arcana
+      POSTGRES_PASSWORD: arcana
+    volumes:
+      - arcana_data:/var/lib/postgresql/data
+
+  worker-2022-01:
+    image: arcana:latest
+    command: arcana ingest ETH-USD --since 2022-01-01 --until 2022-02-01
+    depends_on: [db]
+    environment:
+      ARCANA_DB_HOST: db
+
+  worker-2022-02:
+    image: arcana:latest
+    command: arcana ingest ETH-USD --since 2022-02-01 --until 2022-03-01
+    depends_on: [db]
+    environment:
+      ARCANA_DB_HOST: db
+
+  # ... one service per month, or generate with a script
+
+volumes:
+  arcana_data:
+```
+
+In practice, a `generate_compose.py` script would produce the full compose file for any date range, automatically splitting into monthly workers. The Dockerfile is straightforward — `pip install .` into a Python 3.11 image.
+
+**Storage estimate for 4-year backfill:**
+
+| | Value |
+|---|---|
+| Estimated total trades | ~525 million |
+| Raw storage (uncompressed) | ~80 GB |
+| With TimescaleDB compression | ~15–20 GB |
+| Indexes | ~30 GB uncompressed |
+| **Total disk needed** | **~120 GB uncompressed, ~40 GB compressed** |
+
+TimescaleDB compression should be enabled on the `raw_trades` hypertable for chunks older than 7 days:
+```sql
+ALTER TABLE raw_trades SET (
+  timescaledb.compress,
+  timescaledb.compress_segmentby = 'source, pair',
+  timescaledb.compress_orderby = 'timestamp'
+);
+SELECT add_compression_policy('raw_trades', INTERVAL '7 days');
+```
+
+**Implementation checklist:**
+- [ ] Add `--until` flag to `arcana ingest` CLI and `ingest_backfill()`
+- [ ] Add `ARCANA_DB_HOST` / `ARCANA_DB_*` environment variable support to CLI
+- [ ] Create `Dockerfile`
+- [ ] Create `generate_compose.py` script (takes date range, outputs docker-compose.yml)
+- [ ] Add TimescaleDB compression policy to `init_schema()`
+- [ ] Add a post-backfill validation query: count trades per day, flag gaps
+- [ ] Document the parallel backfill workflow in README
+
 ---
 
 ## Guiding Principles
