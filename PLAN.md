@@ -341,7 +341,7 @@ CREATE TABLE raw_trades (
     price        NUMERIC       NOT NULL,
     size         NUMERIC       NOT NULL,
     side         TEXT          NOT NULL,    -- 'buy', 'sell', or 'unknown'
-    UNIQUE (source, trade_id)
+    UNIQUE (source, trade_id, timestamp)
 );
 
 SELECT create_hypertable('raw_trades', 'timestamp');
