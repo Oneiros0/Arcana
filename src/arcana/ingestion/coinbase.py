@@ -128,12 +128,15 @@ class CoinbaseSource(DataSource):
         start: datetime,
         end: datetime,
     ) -> list[Trade]:
-        """Fetch ALL trades in a time window, paginating automatically.
+        """Fetch ALL trades in a time window using backward sequential pagination.
 
-        Uses binary subdivision: if a single API call hits the per-request
-        limit (300 trades), the window is split in half and each half is
-        fetched recursively. This adapts to any traffic volume — busy
-        hours get subdivided into smaller windows until all trades fit.
+        The Coinbase API returns the most recent trades first. When a single
+        call hits the 300-trade limit, we page backward by moving `end` to
+        before the earliest returned trade and fetching again. Each API call
+        produces useful data — no wasted probe calls.
+
+        For a window with 25K trades, this makes ~84 calls (25000/300)
+        instead of ~255 with the old binary subdivision approach.
 
         Args:
             pair: Trading pair, e.g. 'ETH-USD'.
@@ -143,56 +146,56 @@ class CoinbaseSource(DataSource):
         Returns:
             Complete list of Trade objects in the range, ascending.
         """
-        return self._fetch_with_subdivision(pair, start, end, depth=0)
+        all_trades: list[Trade] = []
+        seen_ids: set[str] = set()
+        current_end = end
+        pages = 0
 
-    def _fetch_with_subdivision(
-        self,
-        pair: str,
-        start: datetime,
-        end: datetime,
-        depth: int,
-    ) -> list[Trade]:
-        """Recursively subdivide time windows to fetch all trades."""
-        MAX_DEPTH = 10  # ~3.5s minimum window from 1-hour start
+        while True:
+            trades = self.fetch_trades(pair=pair, start=start, end=current_end)
+            pages += 1
 
-        trades = self.fetch_trades(pair=pair, start=start, end=end)
+            # Dedup against already-fetched trades
+            new_trades = [t for t in trades if t.trade_id not in seen_ids]
+            seen_ids.update(t.trade_id for t in new_trades)
+            all_trades.extend(new_trades)
 
-        if len(trades) < DEFAULT_LIMIT or depth >= MAX_DEPTH:
-            if depth >= MAX_DEPTH and len(trades) >= DEFAULT_LIMIT:
+            # Under limit means we got everything in the remaining range
+            if len(trades) < DEFAULT_LIMIT:
+                break
+
+            if not new_trades:
                 logger.warning(
-                    "Pagination depth limit reached for %s [%s → %s]: "
-                    "%d trades returned, some may be missing",
+                    "No new trades on page %d for %s [%s → %s] — "
+                    "possible duplicate cluster at boundary",
+                    pages,
                     pair,
                     start.isoformat(),
-                    end.isoformat(),
-                    len(trades),
+                    current_end.isoformat(),
                 )
-            return trades
+                break
 
-        # Window is full — split in half and recurse
-        mid = start + (end - start) / 2
-        logger.debug(
-            "Subdividing window [%s → %s] at depth %d (got %d trades at limit)",
-            start.strftime("%H:%M:%S"),
-            end.strftime("%H:%M:%S"),
-            depth,
-            len(trades),
-        )
+            # Move end backward past the earliest trade we received
+            earliest_ts = min(t.timestamp for t in trades)
+            earliest_unix = int(earliest_ts.timestamp())
+            start_unix = int(start.timestamp())
 
-        time_mod.sleep(RATE_LIMIT_DELAY)
-        left = self._fetch_with_subdivision(pair, start, mid, depth + 1)
-        time_mod.sleep(RATE_LIMIT_DELAY)
-        right = self._fetch_with_subdivision(pair, mid, end, depth + 1)
+            if earliest_unix <= start_unix:
+                break  # Reached the start boundary
 
-        # Deduplicate by trade_id (boundary trades may appear in both halves)
-        seen: set[str] = set()
-        result: list[Trade] = []
-        for trade in left + right:
-            if trade.trade_id not in seen:
-                seen.add(trade.trade_id)
-                result.append(trade)
+            current_end = datetime.fromtimestamp(earliest_unix, tz=timezone.utc)
+            time_mod.sleep(RATE_LIMIT_DELAY)
 
-        return sorted(result, key=lambda t: t.timestamp)
+        if pages > 1:
+            logger.debug(
+                "Paginated %d pages for [%s → %s]: %d trades",
+                pages,
+                start.strftime("%Y-%m-%d %H:%M"),
+                end.strftime("%Y-%m-%d %H:%M"),
+                len(all_trades),
+            )
+
+        return sorted(all_trades, key=lambda t: t.timestamp)
 
     def fetch_trades_window(
         self,

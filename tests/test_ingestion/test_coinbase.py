@@ -195,11 +195,11 @@ class TestCoinbaseSource:
 
 
 class TestFetchAllTrades:
-    """Tests for the binary-subdivision pagination logic."""
+    """Tests for backward sequential pagination logic."""
 
     @patch("arcana.ingestion.coinbase.time_mod.sleep")
-    def test_no_subdivision_when_under_limit(self, mock_sleep):
-        """When API returns fewer than DEFAULT_LIMIT, no subdivision occurs."""
+    def test_single_page_under_limit(self, mock_sleep):
+        """When API returns fewer than DEFAULT_LIMIT, no pagination needed."""
         raw = _make_raw_trades(50)
         source = CoinbaseSource()
         source._client = MagicMock()
@@ -211,24 +211,21 @@ class TestFetchAllTrades:
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
         assert len(trades) == 50
-        assert source._client.get.call_count == 1  # single call, no subdivision
+        assert source._client.get.call_count == 1
 
     @patch("arcana.ingestion.coinbase.time_mod.sleep")
-    def test_subdivides_when_at_limit(self, mock_sleep):
-        """When API returns exactly DEFAULT_LIMIT, window is split in half."""
-        # First call: returns DEFAULT_LIMIT trades → triggers subdivision
-        full_batch = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:00:00Z", prefix="full")
-        # Left half: returns under limit → no further subdivision
-        left_batch = _make_raw_trades(100, "2026-02-10T14:00:00Z", prefix="left")
-        # Right half: returns under limit → no further subdivision
-        right_batch = _make_raw_trades(120, "2026-02-10T14:30:00Z", prefix="right")
+    def test_pages_backward_when_at_limit(self, mock_sleep):
+        """When API returns DEFAULT_LIMIT, should page backward for more."""
+        # Page 1: newest 300 trades (14:55:00 - 14:59:59)
+        page1 = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:55:00Z", prefix="p1")
+        # Page 2: older trades (14:50:00 - 14:54:59), under limit = done
+        page2 = _make_raw_trades(200, "2026-02-10T14:50:00Z", prefix="p2")
 
         source = CoinbaseSource()
         source._client = MagicMock()
         source._client.get.side_effect = [
-            _mock_response({"trades": full_batch}),
-            _mock_response({"trades": left_batch}),
-            _mock_response({"trades": right_batch}),
+            _mock_response({"trades": page1}),
+            _mock_response({"trades": page2}),
         ]
 
         start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
@@ -236,109 +233,93 @@ class TestFetchAllTrades:
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
-        # 3 API calls: initial full → left half → right half
+        assert source._client.get.call_count == 2
+        assert len(trades) == 500  # 300 + 200
+
+    @patch("arcana.ingestion.coinbase.time_mod.sleep")
+    def test_multiple_pages(self, mock_sleep):
+        """Pages backward through 3 pages to collect all trades."""
+        page1 = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:50:00Z", prefix="p1")
+        page2 = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:40:00Z", prefix="p2")
+        page3 = _make_raw_trades(150, "2026-02-10T14:30:00Z", prefix="p3")
+
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.side_effect = [
+            _mock_response({"trades": page1}),
+            _mock_response({"trades": page2}),
+            _mock_response({"trades": page3}),
+        ]
+
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+
+        trades = source.fetch_all_trades("ETH-USD", start, end)
+
         assert source._client.get.call_count == 3
-        # Trades from both halves are merged (deduped by trade_id)
-        assert len(trades) == 220  # 100 + 120 (unique prefixes, no overlap)
-
-    @patch("arcana.ingestion.coinbase.time_mod.sleep")
-    def test_deduplicates_boundary_trades(self, mock_sleep):
-        """Trades appearing in both halves are deduplicated by trade_id."""
-        # Full batch → triggers subdivision
-        full_batch = _make_raw_trades(DEFAULT_LIMIT, prefix="full")
-        # Both halves share 10 trades at the boundary (same prefix = same trade_ids)
-        shared_trades = _make_raw_trades(10, "2026-02-10T14:29:50Z", prefix="shared")
-        left_unique = _make_raw_trades(80, "2026-02-10T14:00:00Z", prefix="left")
-        right_unique = _make_raw_trades(90, "2026-02-10T14:30:00Z", prefix="right")
-
-        source = CoinbaseSource()
-        source._client = MagicMock()
-        source._client.get.side_effect = [
-            _mock_response({"trades": full_batch}),
-            _mock_response({"trades": left_unique + shared_trades}),
-            _mock_response({"trades": shared_trades + right_unique}),
-        ]
-
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
-
-        trades = source.fetch_all_trades("ETH-USD", start, end)
-
-        # 80 left + 10 shared + 90 right = 180 unique trades
-        assert len(trades) == 180
-        # Verify no duplicate trade_ids
-        trade_ids = [t.trade_id for t in trades]
-        assert len(trade_ids) == len(set(trade_ids))
-
-    @patch("arcana.ingestion.coinbase.time_mod.sleep")
-    def test_recursive_subdivision_depth(self, mock_sleep):
-        """Can subdivide multiple levels deep for very busy periods."""
-        # Level 0: full → subdivide
-        full_0 = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:00:00Z", prefix="f0")
-        # Level 1 left: full → subdivide again
-        full_1_left = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:00:00Z", prefix="f1l")
-        # Level 1 right: under limit
-        partial_1_right = _make_raw_trades(100, "2026-02-10T14:30:00Z", prefix="p1r")
-        # Level 2 left-left: under limit
-        partial_2_ll = _make_raw_trades(120, "2026-02-10T14:00:00Z", prefix="p2ll")
-        # Level 2 left-right: under limit
-        partial_2_lr = _make_raw_trades(130, "2026-02-10T14:15:00Z", prefix="p2lr")
-
-        source = CoinbaseSource()
-        source._client = MagicMock()
-        source._client.get.side_effect = [
-            _mock_response({"trades": full_0}),        # depth=0: full window
-            _mock_response({"trades": full_1_left}),    # depth=1: left half
-            _mock_response({"trades": partial_2_ll}),   # depth=2: left-left quarter
-            _mock_response({"trades": partial_2_lr}),   # depth=2: left-right quarter
-            _mock_response({"trades": partial_1_right}),  # depth=1: right half
-        ]
-
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
-
-        trades = source.fetch_all_trades("ETH-USD", start, end)
-
-        assert source._client.get.call_count == 5
-        # All trades deduped and sorted
-        assert len(trades) == 350  # 120 + 130 + 100
+        assert len(trades) == 750  # 300 + 300 + 150
+        # All sorted ascending
         for i in range(1, len(trades)):
             assert trades[i].timestamp >= trades[i - 1].timestamp
 
     @patch("arcana.ingestion.coinbase.time_mod.sleep")
-    def test_respects_max_depth(self, mock_sleep):
-        """Should stop subdividing at MAX_DEPTH and return what it has."""
-        # Always return exactly DEFAULT_LIMIT trades to force maximum recursion
-        always_full = _make_raw_trades(DEFAULT_LIMIT)
+    def test_deduplicates_boundary_trades(self, mock_sleep):
+        """Trades at page boundaries are deduplicated by trade_id."""
+        # 10 trades at the boundary appear in both pages (same prefix)
+        boundary = _make_raw_trades(10, "2026-02-10T14:50:00Z", prefix="shared")
+        newer = _make_raw_trades(DEFAULT_LIMIT - 10, "2026-02-10T14:50:10Z", prefix="p1")
+        older = _make_raw_trades(80, "2026-02-10T14:40:00Z", prefix="p2")
 
         source = CoinbaseSource()
         source._client = MagicMock()
-        source._client.get.return_value = _mock_response({"trades": always_full})
+        source._client.get.side_effect = [
+            _mock_response({"trades": newer + boundary}),  # page 1: newest 300
+            _mock_response({"trades": boundary + older}),   # page 2: overlap + older
+        ]
 
         start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
         end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
-        # Should not recurse forever — bounded by MAX_DEPTH (10)
-        # At depth 10: 2^10 = 1024 leaf calls + internal calls
-        # But with dedup all returning same trade_ids, result is just DEFAULT_LIMIT
+        # 290 newer + 10 shared + 80 older = 380 unique
+        assert len(trades) == 380
+        trade_ids = [t.trade_id for t in trades]
+        assert len(trade_ids) == len(set(trade_ids))
+
+    @patch("arcana.ingestion.coinbase.time_mod.sleep")
+    def test_stops_on_no_progress(self, mock_sleep):
+        """Stops if all returned trades are duplicates (no new data)."""
+        # Trades in the middle of the window — not at the start boundary,
+        # so backward pagination will try another page
+        same_trades = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:30:00Z")
+
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        # Always returns the same trades — second page is all dupes
+        source._client.get.return_value = _mock_response({"trades": same_trades})
+
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+
+        trades = source.fetch_all_trades("ETH-USD", start, end)
+
         assert len(trades) == DEFAULT_LIMIT
-        assert source._client.get.call_count > 1  # subdivision happened
+        # Should stop after 2 calls (first gets data, second is all dupes)
+        assert source._client.get.call_count == 2
 
     @patch("arcana.ingestion.coinbase.time_mod.sleep")
     def test_results_sorted_ascending(self, mock_sleep):
-        """Output from fetch_all_trades is always sorted ascending by timestamp."""
-        full_batch = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:00:00Z", prefix="full")
-        left = _make_raw_trades(50, "2026-02-10T14:00:00Z", prefix="left")
-        right = _make_raw_trades(60, "2026-02-10T14:30:00Z", prefix="right")
+        """Output is always sorted ascending by timestamp."""
+        # Pages come in reverse chronological order but output should be ascending
+        page1 = _make_raw_trades(DEFAULT_LIMIT, "2026-02-10T14:50:00Z", prefix="p1")
+        page2 = _make_raw_trades(100, "2026-02-10T14:00:00Z", prefix="p2")
 
         source = CoinbaseSource()
         source._client = MagicMock()
         source._client.get.side_effect = [
-            _mock_response({"trades": full_batch}),
-            _mock_response({"trades": left}),
-            _mock_response({"trades": right}),
+            _mock_response({"trades": page1}),
+            _mock_response({"trades": page2}),
         ]
 
         start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
