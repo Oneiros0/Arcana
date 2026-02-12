@@ -72,6 +72,7 @@ def generate_compose(
     db_user: str = "arcana",
     db_password: str = "arcana",
     image: str = "arcana:latest",
+    multi_ip: bool = False,
 ) -> dict:
     """Generate a docker-compose service dict for parallel backfill.
 
@@ -91,6 +92,15 @@ def generate_compose(
         A dict that can be serialized to docker-compose.yml.
     """
     chunks = split_range(since, until, workers)
+
+    # Scale the per-worker rate delay so the aggregate stays under 10 req/s.
+    # Single process: 0.12s delay = ~8 req/s. With N workers sharing one IP,
+    # each worker sleeps N * 0.12s between pagination calls.
+    # With --multi-ip, each worker has its own IP and gets the full budget.
+    if multi_ip:
+        rate_delay = 0.12
+    else:
+        rate_delay = round(workers * 0.12, 2)
 
     services: dict = {
         "db": {
@@ -129,6 +139,7 @@ def generate_compose(
                 "ARCANA_DB_NAME": db_name,
                 "ARCANA_DB_USER": db_user,
                 "ARCANA_DB_PASSWORD": db_password,
+                "ARCANA_RATE_DELAY": str(rate_delay),
             },
             "depends_on": {
                 "db": {"condition": "service_healthy"},
@@ -170,16 +181,25 @@ def format_worker_summary(
     since: datetime,
     until: datetime,
     workers: int,
+    multi_ip: bool = False,
 ) -> str:
     """Format a human-readable summary of the planned swarm."""
     chunks = split_range(since, until, workers)
     total_days = (until - since).days
     days_per_worker = total_days / workers
 
+    if multi_ip:
+        rate_delay = 0.12
+    else:
+        rate_delay = round(workers * 0.12, 2)
+    per_worker_rps = round(1 / rate_delay, 1) if rate_delay > 0 else 0
+
+    mode_label = "multi-ip" if multi_ip else "shared-ip"
     lines = [
         f"Swarm plan: {pair} | {since.date()} → {until.date()} "
         f"({total_days} days)",
-        f"Workers: {workers} (~{days_per_worker:.1f} days each)",
+        f"Workers: {workers} (~{days_per_worker:.1f} days each, "
+        f"{rate_delay}s delay = ~{per_worker_rps} req/s each, {mode_label})",
         "",
         f"  {'#':>3s}  {'start':>12s}  {'end':>12s}  {'days':>5s}",
         f"  {'─' * 3}  {'─' * 12}  {'─' * 12}  {'─' * 5}",

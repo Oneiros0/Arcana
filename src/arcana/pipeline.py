@@ -6,6 +6,7 @@ graceful shutdown support.
 """
 
 import logging
+import os
 import signal
 import time as time_mod
 from datetime import datetime, timedelta, timezone
@@ -138,7 +139,8 @@ def ingest_backfill(
         )
 
         current = window_end
-        time_mod.sleep(0.12)  # rate limit
+        rate_delay = float(os.environ.get("ARCANA_RATE_DELAY", 0.12))
+        time_mod.sleep(rate_delay)
 
     # Final flush
     if batch_buffer:
