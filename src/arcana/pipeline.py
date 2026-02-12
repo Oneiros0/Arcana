@@ -63,13 +63,16 @@ def ingest_backfill(
     """
     shutdown = GracefulShutdown()
 
-    # Resume from last stored trade if any
-    last_ts = db.get_last_timestamp(pair, source.name)
+    end = until or datetime.now(timezone.utc)
+
+    # Resume from last stored trade within this worker's range.
+    # The `before=end` bound is critical for swarm workers: without it,
+    # a global MAX might return a timestamp past this worker's `until`,
+    # causing the worker to think its range is fully covered.
+    last_ts = db.get_last_timestamp(pair, source.name, before=end)
     if last_ts and last_ts > since:
         logger.info("Resuming from %s (found existing data)", last_ts.isoformat())
         since = last_ts
-
-    end = until or datetime.now(timezone.utc)
     total_windows = max(1, int((end - since) / window) + 1)
     current = since
     window_num = 0
