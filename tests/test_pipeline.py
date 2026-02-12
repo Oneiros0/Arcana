@@ -86,6 +86,34 @@ class TestIngestBackfill:
 
     @patch("arcana.pipeline.GracefulShutdown")
     @patch("arcana.pipeline.time_mod.sleep")
+    def test_backfill_resume_scoped_to_until(self, mock_sleep, mock_shutdown):
+        """Resume query should be bounded by `until` so swarm workers
+        don't see trades outside their assigned range."""
+        mock_shutdown.return_value.should_stop = False
+
+        source = MagicMock(spec=CoinbaseSource)
+        source.name = "coinbase"
+        source.fetch_all_trades.return_value = _make_trades(5)
+        source._client = True
+
+        until = datetime(2026, 2, 4, 0, 0, 0, tzinfo=timezone.utc)
+
+        db = MagicMock()
+        # Simulate: global max is Feb 12 (from another worker), but
+        # within this worker's range the max is Feb 3
+        db.get_last_timestamp.return_value = datetime(
+            2026, 2, 3, 12, 0, 0, tzinfo=timezone.utc
+        )
+        db.insert_trades.return_value = 5
+
+        since = datetime(2026, 2, 3, 0, 0, 0, tzinfo=timezone.utc)
+        ingest_backfill(source, db, "ETH-USD", since, until=until)
+
+        # Verify get_last_timestamp was called with before=until
+        db.get_last_timestamp.assert_called_once_with("ETH-USD", "coinbase", before=until)
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
     def test_backfill_checkpoints_in_batches(self, mock_sleep, mock_shutdown):
         """Trades should be committed in batches of BATCH_SIZE."""
         mock_shutdown.return_value.should_stop = False
