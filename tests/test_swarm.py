@@ -154,6 +154,26 @@ class TestGenerateCompose:
 
         assert "healthcheck" in compose["services"]["db"]
 
+    def test_workers_have_rate_delay(self):
+        since = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 4, 1, tzinfo=timezone.utc)
+        compose = generate_compose("ETH-USD", since, until, workers=4)
+
+        workers = {k: v for k, v in compose["services"].items() if k != "db"}
+        for name, svc in workers.items():
+            # 4 workers * 0.12 = 0.48s per worker
+            assert svc["environment"]["ARCANA_RATE_DELAY"] == "0.48"
+
+    def test_multi_ip_rate_delay(self):
+        since = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 4, 1, tzinfo=timezone.utc)
+        compose = generate_compose("ETH-USD", since, until, workers=4, multi_ip=True)
+
+        workers = {k: v for k, v in compose["services"].items() if k != "db"}
+        for name, svc in workers.items():
+            # multi-ip: each worker gets full budget, delay stays at 0.12
+            assert svc["environment"]["ARCANA_RATE_DELAY"] == "0.12"
+
     def test_restart_on_failure(self):
         since = datetime(2024, 1, 1, tzinfo=timezone.utc)
         until = datetime(2024, 2, 1, tzinfo=timezone.utc)
@@ -176,14 +196,38 @@ class TestFormatSummary:
         assert "12" in summary
         assert "730 days" in summary
 
+    def test_summary_shows_rate_info(self):
+        since = datetime(2022, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        summary = format_worker_summary("ETH-USD", since, until, 4)
+
+        assert "delay" in summary
+        assert "req/s" in summary
+
+    def test_summary_multi_ip_mode(self):
+        since = datetime(2022, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        summary = format_worker_summary("ETH-USD", since, until, 4, multi_ip=True)
+
+        assert "multi-ip" in summary
+        assert "0.12s delay" in summary
+
+    def test_summary_shared_ip_mode(self):
+        since = datetime(2022, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        summary = format_worker_summary("ETH-USD", since, until, 4, multi_ip=False)
+
+        assert "shared-ip" in summary
+        assert "0.48s delay" in summary
+
     def test_summary_lists_all_workers(self):
         since = datetime(2024, 1, 1, tzinfo=timezone.utc)
         until = datetime(2024, 4, 1, tzinfo=timezone.utc)
         summary = format_worker_summary("ETH-USD", since, until, 3)
 
         lines = summary.strip().split("\n")
-        # Header + column header + divider + 3 workers = at least 6 lines
-        assert len(lines) >= 6
+        # Header + rate info + column header + divider + 3 workers = at least 7 lines
+        assert len(lines) >= 7
 
 
 class TestSwarmCLI:
@@ -208,6 +252,7 @@ class TestSwarmCLI:
         assert "--since" in result.output
         assert "--workers" in result.output
         assert "--until" in result.output
+        assert "--multi-ip" in result.output
 
     def test_swarm_launch_generates_file(self, tmp_path):
         from click.testing import CliRunner
@@ -230,6 +275,31 @@ class TestSwarmCLI:
         with open(output) as f:
             compose = yaml.safe_load(f)
         assert len(compose["services"]) == 4  # 3 workers + db
+
+    def test_swarm_launch_multi_ip(self, tmp_path):
+        from click.testing import CliRunner
+        from arcana.cli import cli
+
+        output = tmp_path / "test-compose-multi.yml"
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "swarm", "launch", "ETH-USD",
+            "--since", "2024-01-01",
+            "--until", "2024-04-01",
+            "--workers", "4",
+            "--multi-ip",
+            "--output", str(output),
+        ])
+
+        assert result.exit_code == 0
+        assert "multi-ip" in result.output
+        assert output.exists()
+
+        with open(output) as f:
+            compose = yaml.safe_load(f)
+        workers = {k: v for k, v in compose["services"].items() if k != "db"}
+        for svc in workers.values():
+            assert svc["environment"]["ARCANA_RATE_DELAY"] == "0.12"
 
     def test_swarm_validate_help(self):
         from click.testing import CliRunner

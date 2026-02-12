@@ -588,7 +588,7 @@ Every 15 minutes:
 
 **The problem:** Single-process backfill is bottlenecked by the Coinbase rate limit (10 req/s per IP). A 4-year backfill of ETH-USD takes ~15 days serially. The data is time-partitioned and writes are idempotent (upsert), so parallel ingestion across non-overlapping time ranges is safe by construction.
 
-**The approach:** Run N Docker containers, each responsible for a distinct month of historical data. Each container runs the existing `arcana ingest` command with `--since` and a computed `--until` flag. Since the Coinbase public rate limit is **per IP**, each container on a Docker network gets its own rate limit budget.
+**The approach:** Run N Docker containers, each responsible for a distinct chunk of historical data. Each container runs the existing `arcana ingest` command with `--since` and `--until`. On a single host, all containers share one public IP, so the 10 req/s Coinbase rate limit is shared. The `ARCANA_RATE_DELAY` env var scales each worker's delay to `N * 0.12s` so the aggregate stays under the limit. On multiple hosts (true Docker Swarm or separate machines), each host gets its own IP and rate budget — that's where the linear speedup comes from.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -635,17 +635,24 @@ arcana ingest ETH-USD --since 2023-01-01 --until 2023-02-01
 arcana ingest ETH-USD --since 2023-02-01 --until 2023-03-01
 ```
 
-**Estimated speedup:**
+**Rate limiting and speedup:**
 
-| Workers | Rate (aggregate) | 4-year ETH-USD | Wall clock |
+On a **single host**, all workers share one public IP. The aggregate rate is always ~8 req/s regardless of worker count. More workers don't make API calls faster — they split the work into smaller ranges so each finishes sooner, and the swarm can resume from partial progress per-worker.
+
+| Setup | Workers | Aggregate rate | 4-year ETH-USD |
 |---|---|---|---|
-| 1 (current) | ~8 req/s | ~525M trades | ~15 days |
-| 6 | ~48 req/s | same | ~2.5 days |
-| 12 | ~96 req/s | same | ~1.3 days |
-| 24 | ~192 req/s | same | ~16 hours |
-| 48 (1 per month) | ~384 req/s | same | ~8 hours |
+| Single host | 1 | ~8 req/s | ~15 days |
+| Single host | 4 | ~8 req/s | ~15 days (but 4 smaller ranges) |
+| 4 separate hosts | 4 (1 per host) | ~32 req/s | ~3.7 days |
+| 12 separate hosts | 12 (1 per host) | ~96 req/s | ~1.3 days |
+| 24 separate hosts | 24 (1 per host) | ~192 req/s | ~16 hours |
 
-Diminishing returns above ~24 workers because DB write throughput and container overhead become factors. The sweet spot is likely **12–24 workers** for a 4-year backfill, finishing in **1–2 days**.
+True parallel speedup requires **multiple public IPs** — either separate machines, cloud VMs, or proxy rotation. On a single machine, the swarm's value is work partitioning and per-worker resumability, not API throughput.
+
+When using separate IPs (VPN, proxy rotation, or separate machines), pass `--multi-ip` to skip rate-delay scaling — each worker keeps the default 0.12s delay (~8 req/s per worker):
+```bash
+arcana swarm launch ETH-USD --since 2022-01-01 --workers 12 --multi-ip
+```
 
 **Docker Compose sketch:**
 ```yaml
@@ -710,6 +717,7 @@ Key options:
 | `--output` | `docker-compose.swarm.yml` | Output file path |
 | `--image` | `arcana:latest` | Docker image for workers |
 | `--password` | `arcana` | Database password |
+| `--multi-ip` | off | Workers have separate IPs (VPN/proxy); skip rate-delay scaling |
 | `--up` | off | Auto-start containers after generating |
 
 **Step 3 — Start the swarm:**
