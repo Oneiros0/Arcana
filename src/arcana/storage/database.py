@@ -173,17 +173,23 @@ class Database:
             row = cur.fetchone()
             return row[0] if row else 0
 
-    def get_last_timestamp(self, pair: str, source: str = "coinbase") -> datetime | None:
+    def get_last_timestamp(
+        self, pair: str, source: str = "coinbase", before: datetime | None = None
+    ) -> datetime | None:
         """Get the most recent trade timestamp for a pair.
 
-        Used by the daemon to know where to resume ingestion.
+        Used by the daemon and backfill to know where to resume.
+        When *before* is set, only considers trades at or before that
+        timestamp — essential for swarm workers that own a sub-range.
         """
         conn = self.connect()
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MAX(timestamp) FROM raw_trades WHERE pair = %s AND source = %s",
-                (pair, source),
-            )
+            query = "SELECT MAX(timestamp) FROM raw_trades WHERE pair = %s AND source = %s"
+            params: list[object] = [pair, source]
+            if before is not None:
+                query += " AND timestamp <= %s"
+                params.append(before)
+            cur.execute(query, params)
             row = cur.fetchone()
             return row[0] if row and row[0] else None
 
