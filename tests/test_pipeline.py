@@ -10,7 +10,13 @@ import pytest
 from arcana.bars.standard import TickBarBuilder
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.ingestion.models import Trade
-from arcana.pipeline import _format_eta, build_bars, ingest_backfill, run_daemon
+from arcana.pipeline import (
+    _format_eta,
+    build_bars,
+    calibrate_dollar_threshold,
+    ingest_backfill,
+    run_daemon,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -321,6 +327,50 @@ class TestRunDaemon:
 
         with pytest.raises(RuntimeError, match="No trades found"):
             run_daemon(source, db, "ETH-USD")
+
+
+class TestCalibrateDollarThreshold:
+    def test_calibrate_basic(self):
+        """Should compute threshold from dollar volume and time span."""
+        db = MagicMock()
+        # $10M over 10 days, target 50 bars/day → 500 total bars → $20,000 per bar
+        db.get_dollar_volume_stats.return_value = (10_000_000.0, 10.0)
+
+        threshold = calibrate_dollar_threshold(db, "ETH-USD", bars_per_day=50)
+
+        # raw = 10M / 500 = 20,000 → rounded to 20,000
+        assert threshold == 20_000
+
+    def test_calibrate_rounds_to_clean_value(self):
+        """Threshold should be rounded to nearest significant digit."""
+        db = MagicMock()
+        # $50.9B over 94.7 days, target 50 bars/day
+        db.get_dollar_volume_stats.return_value = (50_900_000_000.0, 94.7)
+
+        threshold = calibrate_dollar_threshold(db, "ETH-USD", bars_per_day=50)
+
+        # raw = 50.9B / 4735 ≈ $10,749,736 → rounded to 10,000,000 or 11,000,000
+        assert threshold >= 10_000_000
+        assert threshold <= 11_000_000
+
+    def test_calibrate_custom_bars_per_day(self):
+        """Should respect bars_per_day parameter."""
+        db = MagicMock()
+        db.get_dollar_volume_stats.return_value = (10_000_000.0, 10.0)
+
+        t50 = calibrate_dollar_threshold(db, "ETH-USD", bars_per_day=50)
+        t100 = calibrate_dollar_threshold(db, "ETH-USD", bars_per_day=100)
+
+        # More bars/day → smaller threshold
+        assert t100 < t50
+
+    def test_calibrate_no_data_raises(self):
+        """Should raise ValueError when no trade data exists."""
+        db = MagicMock()
+        db.get_dollar_volume_stats.return_value = None
+
+        with pytest.raises(ValueError, match="No trade data"):
+            calibrate_dollar_threshold(db, "ETH-USD")
 
 
 class TestFormatEta:

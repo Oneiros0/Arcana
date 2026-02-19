@@ -76,7 +76,11 @@ def run_arcana(*args: str, timeout: int = 7200) -> tuple[int, str]:
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, env=env,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
         )
         # Log output to file (not to stdout to reduce noise)
         if result.stderr:
@@ -91,9 +95,18 @@ def run_arcana(*args: str, timeout: int = 7200) -> tuple[int, str]:
 def psql(query: str) -> str:
     """Run a psql query and return result."""
     cmd = [
-        "docker", "exec", "arcana-tsdb",
-        "psql", "-U", "arcana", "-d", "arcana",
-        "-t", "-A", "-c", query,
+        "docker",
+        "exec",
+        "arcana-tsdb",
+        "psql",
+        "-U",
+        "arcana",
+        "-d",
+        "arcana",
+        "-t",
+        "-A",
+        "-c",
+        query,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     return result.stdout.strip()
@@ -116,30 +129,27 @@ def record_failure(phase: str, detail: str) -> None:
     log(f"  FAILURE: {phase} — {detail}")
 
 
-def ingest_chunk(
-    since: str, until: str, chunk_label: str
-) -> tuple[bool, int]:
+def ingest_chunk(since: str, until: str, chunk_label: str) -> tuple[bool, int]:
     """Ingest a single time chunk with retry logic.
 
     Returns (success, trades_inserted).
     """
     for attempt in range(1, MAX_RETRIES + 1):
         # Check what we have before
-        count_before = psql_int(
-            f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';"
-        )
+        count_before = psql_int(f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';")
 
         log(f"  Attempt {attempt}/{MAX_RETRIES} for {chunk_label}")
         rc, out = run_arcana(
-            "ingest", PAIR,
-            "--since", since,
-            "--until", until,
+            "ingest",
+            PAIR,
+            "--since",
+            since,
+            "--until",
+            until,
             timeout=7200,  # 2 hours per chunk max
         )
 
-        count_after = psql_int(
-            f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';"
-        )
+        count_after = psql_int(f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';")
         new_trades = count_after - count_before
 
         if rc == 0:
@@ -153,8 +163,10 @@ def ingest_chunk(
         if attempt < MAX_RETRIES:
             # Still got some trades? That's progress — resumable.
             if new_trades > 0:
-                log(f"  Partial progress: +{new_trades:,} trades saved "
-                    "(will resume from last trade)")
+                log(
+                    f"  Partial progress: +{new_trades:,} trades saved "
+                    "(will resume from last trade)"
+                )
             log(f"  Retrying in {RETRY_DELAY}s...")
             time.sleep(RETRY_DELAY)
 
@@ -163,9 +175,7 @@ def ingest_chunk(
     return False, 0
 
 
-def generate_monthly_chunks(
-    start: datetime, end: datetime
-) -> list[tuple[str, str, str]]:
+def generate_monthly_chunks(start: datetime, end: datetime) -> list[tuple[str, str, str]]:
     """Generate (since, until, label) tuples for monthly chunks."""
     chunks = []
     current = start
@@ -201,22 +211,24 @@ def main() -> int:
         log("  Cannot proceed without database. Exiting.")
         return 1
 
-    # Clean slate — drop everything and start fresh
-    log("  Clearing database for fresh start...")
-    bar_tables = psql(
-        "SELECT tablename FROM pg_tables "
-        "WHERE schemaname = 'public' AND tablename LIKE 'bars_%';"
-    )
-    for t in bar_tables.splitlines():
-        if t.strip():
-            psql(f"DROP TABLE IF EXISTS {t.strip()} CASCADE;")
-    psql("DROP TABLE IF EXISTS raw_trades CASCADE;")
-    log("  All tables dropped.")
+    # Check existing data — resume if present, fresh start only if empty
+    existing_trades = 0
+    try:
+        existing_trades = psql_int(f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';")
+    except Exception:
+        pass  # Table doesn't exist yet
 
-    # Init schema
+    if existing_trades > 0:
+        last_ts = psql(f"SELECT MAX(timestamp)::text FROM raw_trades WHERE pair = '{PAIR}';")
+        log(f"  Existing data found: {existing_trades:,} trades (through {last_ts})")
+        log("  Resuming from where we left off.")
+    else:
+        log("  No existing data — fresh start.")
+
+    # Ensure schema exists (idempotent — won't drop existing tables)
     rc, _ = run_arcana("db", "init")
     if rc == 0:
-        log("  Schema: initialized (fresh)")
+        log("  Schema: OK")
     else:
         log("  Schema init failed!")
         return 1
@@ -237,6 +249,26 @@ def main() -> int:
     chunks_failed = 0
 
     for i, (since, until, label) in enumerate(chunks, 1):
+        # Skip chunks that are already fully covered
+        chunk_end_dt = datetime.fromisoformat(until).replace(tzinfo=UTC)
+        try:
+            last_ts_str = psql(
+                f"SELECT MAX(timestamp)::text FROM raw_trades WHERE pair = '{PAIR}';"
+            )
+            if last_ts_str and last_ts_str != "":
+                # Parse the timestamp (psql returns ISO format)
+                last_ts_str = last_ts_str.strip()
+                if "+" in last_ts_str:
+                    last_dt = datetime.fromisoformat(last_ts_str)
+                else:
+                    last_dt = datetime.fromisoformat(last_ts_str).replace(tzinfo=UTC)
+                if last_dt >= chunk_end_dt:
+                    log(f"  [{i}/{len(chunks)}] {label} — SKIPPED (already ingested)")
+                    chunks_ok += 1
+                    continue
+        except Exception:
+            pass  # Can't check, just proceed normally
+
         log(f"  [{i}/{len(chunks)}] {label}")
         t0 = time.time()
         ok, count = ingest_chunk(since, until, label)
@@ -249,20 +281,29 @@ def main() -> int:
             chunks_failed += 1
 
         # Running total
-        total_trades = psql_int(
-            f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';"
-        )
-        log(f"  Chunk done in {elapsed:.0f}s | "
+        total_trades = psql_int(f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';")
+        log(
+            f"  Chunk done in {elapsed:.0f}s | "
             f"Total: {total_trades:,} trades | "
-            f"Chunks: {chunks_ok} ok, {chunks_failed} failed")
+            f"Chunks: {chunks_ok} ok, {chunks_failed} failed"
+        )
         log("")
 
     # ── 3. Build all 11 bar types ─────────────────────────────────────
     log_section("3. BAR CONSTRUCTION (11 types)")
 
     bar_specs = [
-        "tick_500", "volume_100", "dollar_50000", "time_5m", "time_1h",
-        "tib_10", "vib_10", "dib_10", "trb_10", "vrb_10", "drb_10",
+        "tick_500",
+        "volume_100",
+        "dollar_50000",
+        "time_5m",
+        "time_1h",
+        "tib_10",
+        "vib_10",
+        "dib_10",
+        "trb_10",
+        "vrb_10",
+        "drb_10",
     ]
 
     for spec in bar_specs:
@@ -291,9 +332,7 @@ def main() -> int:
     # ── 4. Start daemon ───────────────────────────────────────────────
     log_section("4. DAEMON (runs until interrupted)")
 
-    total_before = psql_int(
-        f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';"
-    )
+    total_before = psql_int(f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';")
     log(f"  Trades before daemon: {total_before:,}")
     log(f"  Interval: {DAEMON_INTERVAL}s ({DAEMON_INTERVAL // 60} min)")
     log("  Press Ctrl+C to stop")
@@ -306,21 +345,21 @@ def main() -> int:
         daemon_cycles += 1
         try:
             rc, out = run_arcana(
-                "ingest", PAIR,
-                "--since", (datetime.now(UTC) - timedelta(hours=1)).strftime(
-                    "%Y-%m-%dT%H:%M:%S"
-                ),
+                "ingest",
+                PAIR,
+                "--since",
+                (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S"),
                 timeout=300,
             )
 
-            current = psql_int(
-                f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';"
-            )
+            current = psql_int(f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';")
             new = current - total_before
             uptime = time.time() - daemon_start
-            log(f"  Cycle {daemon_cycles} | "
+            log(
+                f"  Cycle {daemon_cycles} | "
                 f"Trades: {current:,} (+{new:,}) | "
-                f"Uptime: {uptime / 3600:.1f}h")
+                f"Uptime: {uptime / 3600:.1f}h"
+            )
 
         except KeyboardInterrupt:
             log("  Ctrl+C received — shutting down daemon")
@@ -341,9 +380,7 @@ def main() -> int:
     log_section("SUMMARY")
 
     elapsed_total = time.time() - script_start
-    final_trades = psql_int(
-        f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';"
-    )
+    final_trades = psql_int(f"SELECT COUNT(*) FROM raw_trades WHERE pair = '{PAIR}';")
     trade_range = psql(
         f"SELECT MIN(timestamp)::text || ' to ' || MAX(timestamp)::text "
         f"FROM raw_trades WHERE pair = '{PAIR}';"

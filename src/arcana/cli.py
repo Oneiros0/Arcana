@@ -14,7 +14,13 @@ import click
 
 from arcana.config import DatabaseConfig
 from arcana.ingestion.coinbase import CoinbaseSource
-from arcana.pipeline import DAEMON_INTERVAL, build_bars, ingest_backfill, run_daemon
+from arcana.pipeline import (
+    DAEMON_INTERVAL,
+    build_bars,
+    calibrate_dollar_threshold,
+    ingest_backfill,
+    run_daemon,
+)
 from arcana.storage.database import Database
 
 if TYPE_CHECKING:
@@ -232,11 +238,16 @@ _BAR_SPEC_PATTERN = re.compile(
     r"^(tick|volume|dollar)_(\d+(?:\.\d+)?)$"
     r"|^time_(\d+)([smhd])$"
     r"|^(tib|vib|dib|trb|vrb|drb)_(\d+)$"
+    r"|^dollar_auto(?:_(\d+))?$"
 )
 
 
-def _parse_bar_spec(spec: str, source: str, pair: str) -> BarBuilder:
-    """Parse a bar spec string like 'tick_500' or 'tib_20' into a BarBuilder."""
+def _parse_bar_spec(spec: str, source: str, pair: str, db: Database | None = None) -> BarBuilder:
+    """Parse a bar spec string like 'tick_500' or 'tib_20' into a BarBuilder.
+
+    For 'dollar_auto' specs, a database connection is required to calibrate
+    the threshold from trade data.
+    """
     from arcana.bars.imbalance import (
         DollarImbalanceBarBuilder,
         TickImbalanceBarBuilder,
@@ -258,13 +269,21 @@ def _parse_bar_spec(spec: str, source: str, pair: str) -> BarBuilder:
     if not m:
         raise click.BadParameter(
             f"Invalid bar spec '{spec}'. "
-            "Expected: tick_N, volume_N, dollar_N, time_Nu, "
+            "Expected: tick_N, volume_N, dollar_N, dollar_auto[_N], time_Nu, "
             "tib_N, vib_N, dib_N, trb_N, vrb_N, or drb_N. "
-            "Examples: tick_500, time_5m, dollar_50000, tib_20, trb_10",
+            "Examples: tick_500, time_5m, dollar_50000, dollar_auto, dollar_auto_50, tib_20",
             param_hint="'BAR_SPEC'",
         )
 
-    if m.group(1):  # tick, volume, or dollar (standard)
+    if m.group(7) is not None or spec.startswith("dollar_auto"):
+        # dollar_auto or dollar_auto_50
+        if db is None:
+            raise click.UsageError("dollar_auto requires a database connection to calibrate.")
+        bars_per_day = int(m.group(7)) if m.group(7) else 50
+        threshold = calibrate_dollar_threshold(db, pair, bars_per_day, source)
+        click.echo(f"Auto-calibrated: dollar_{threshold} ({bars_per_day} bars/day target)")
+        return DollarBarBuilder(source, pair, threshold=Decimal(threshold))
+    elif m.group(1):  # tick, volume, or dollar (standard)
         bar_type = m.group(1)
         value = m.group(2)
         if bar_type == "tick":
@@ -323,6 +342,8 @@ def bars_build(
         tick_500      500-trade bars
         volume_100    100-unit volume bars
         dollar_50000  $50k notional bars
+        dollar_auto   Auto-calibrated dollar bars (50 bars/day)
+        dollar_auto_100  Auto-calibrated (100 bars/day)
         time_5m       5-minute time bars (s/m/h/d)
 
     \b
@@ -339,17 +360,26 @@ def bars_build(
     \b
     Examples:
       arcana bars build tick_500 ETH-USD
+      arcana bars build dollar_auto ETH-USD
       arcana bars build time_1h ETH-USD
       arcana bars build tib_20 ETH-USD
-      arcana bars build drb_10 ETH-USD
     """
-    builder = _parse_bar_spec(bar_spec, source="coinbase", pair=pair)
-    config = _db_config_from_options(host, port, database, user, password)
+    # Validate bar spec format before connecting to DB
+    if not _BAR_SPEC_PATTERN.match(bar_spec):
+        raise click.BadParameter(
+            f"Invalid bar spec '{bar_spec}'. "
+            "Expected: tick_N, volume_N, dollar_N, dollar_auto[_N], time_Nu, "
+            "tib_N, vib_N, dib_N, trb_N, vrb_N, or drb_N. "
+            "Examples: tick_500, time_5m, dollar_50000, dollar_auto, tib_20",
+            param_hint="'BAR_SPEC'",
+        )
 
-    click.echo(f"Building {builder.bar_type} bars for {pair}...")
+    config = _db_config_from_options(host, port, database, user, password)
 
     try:
         with Database(config) as db_conn:
+            builder = _parse_bar_spec(bar_spec, source="coinbase", pair=pair, db=db_conn)
+            click.echo(f"Building {builder.bar_type} bars for {pair}...")
             total = build_bars(builder, db_conn, pair)
     except Exception as exc:
         click.echo(f"Failed to build bars: {exc}", err=True)
