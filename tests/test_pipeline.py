@@ -4,13 +4,14 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from arcana.bars.standard import TickBarBuilder
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.ingestion.models import Trade
-from arcana.pipeline import BATCH_SIZE, _format_eta, ingest_backfill
+from arcana.pipeline import BATCH_SIZE, _format_eta, build_bars, ingest_backfill
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -169,6 +170,106 @@ class TestIngestBackfill:
 
         # Should have committed the buffer before stopping
         assert db.insert_trades.called
+
+
+class TestBuildBars:
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_processes_trades(self, mock_shutdown):
+        """build_bars should fetch trades, run builder, and store bars."""
+        mock_shutdown.return_value.should_stop = False
+        trades = _make_trades(10)
+
+        db = MagicMock()
+        db.get_last_bar_time.return_value = None
+        db.get_first_timestamp.return_value = trades[0].timestamp
+        db.get_trades_since.return_value = trades
+        db.insert_bars.return_value = 1
+
+        builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
+        total = build_bars(builder, db, "ETH-USD")
+
+        # 10 trades / 5 threshold = 2 full bars + possible flush
+        assert total >= 2
+        assert db.insert_bars.called
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_resumes_from_last_bar(self, mock_shutdown):
+        """If bars exist, should resume from last bar's time_end."""
+        mock_shutdown.return_value.should_stop = False
+
+        last_bar_time = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+
+        db = MagicMock()
+        db.get_last_bar_time.return_value = last_bar_time
+        db.get_trades_since.return_value = []
+
+        builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
+        build_bars(builder, db, "ETH-USD")
+
+        # Should query trades starting from last bar time, not first trade
+        db.get_trades_since.assert_called_once_with(
+            "ETH-USD", last_bar_time, "coinbase", limit=100_000
+        )
+        db.get_first_timestamp.assert_not_called()
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_no_trades_returns_zero(self, mock_shutdown):
+        """If no trades exist, should return 0 and not crash."""
+        mock_shutdown.return_value.should_stop = False
+
+        db = MagicMock()
+        db.get_last_bar_time.return_value = None
+        db.get_first_timestamp.return_value = None
+
+        builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
+        total = build_bars(builder, db, "ETH-USD")
+
+        assert total == 0
+
+    @patch("arcana.pipeline.TRADE_BATCH", 10)
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_paginates(self, mock_shutdown):
+        """Should loop through batches until trades are exhausted."""
+        mock_shutdown.return_value.should_stop = False
+
+        # First batch exactly at TRADE_BATCH (10) triggers pagination
+        batch1 = _make_trades(10)
+        batch2 = _make_trades(
+            5, start_ts=datetime(2026, 2, 10, 12, 0, 10, tzinfo=timezone.utc)
+        )
+
+        db = MagicMock()
+        db.get_last_bar_time.return_value = None
+        db.get_first_timestamp.return_value = batch1[0].timestamp
+        db.get_trades_since.side_effect = [batch1, batch2]
+        db.insert_bars.return_value = 1
+
+        builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
+        build_bars(builder, db, "ETH-USD")
+
+        # Should have called get_trades_since twice (batch1 at limit, batch2 under)
+        assert db.get_trades_since.call_count == 2
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_flushes_partial(self, mock_shutdown):
+        """Should flush partial bar at end of data."""
+        mock_shutdown.return_value.should_stop = False
+
+        # 3 trades with threshold=5 means no full bar, but flush should emit one
+        trades = _make_trades(3)
+
+        db = MagicMock()
+        db.get_last_bar_time.return_value = None
+        db.get_first_timestamp.return_value = trades[0].timestamp
+        db.get_trades_since.return_value = trades
+        db.insert_bars.return_value = 1
+
+        builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
+        total = build_bars(builder, db, "ETH-USD")
+
+        # The flush should produce 1 bar
+        assert total == 1
+        assert db.insert_bars.called
 
 
 class TestFormatEta:
