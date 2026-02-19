@@ -311,6 +311,23 @@ class Database:
             for r in rows
         ]
 
+    def get_first_timestamp(
+        self, pair: str, source: str = "coinbase"
+    ) -> datetime | None:
+        """Get the earliest trade timestamp for a pair.
+
+        Used by bar builders to determine where to start construction
+        when no bars have been built yet.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(timestamp) FROM raw_trades WHERE pair = %s AND source = %s",
+                (pair, source),
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+
     def get_trade_count(self, pair: str | None = None) -> int:
         """Get total trade count, optionally filtered by pair."""
         conn = self.connect()

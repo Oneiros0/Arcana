@@ -1,4 +1,4 @@
-"""Ingestion pipeline — bulk backfill and daemon mode.
+"""Ingestion pipeline — bulk backfill, bar construction, and daemon mode.
 
 This module orchestrates fetching trades from a DataSource and storing
 them in the database, with checkpointing, progress logging, and
@@ -11,6 +11,7 @@ import signal
 import time as time_mod
 from datetime import datetime, timedelta, timezone
 
+from arcana.bars.base import BarBuilder
 from arcana.ingestion.base import DataSource
 from arcana.ingestion.models import Trade
 from arcana.storage.database import Database
@@ -232,6 +233,102 @@ def run_daemon(
 
     total = db.get_trade_count(pair)
     logger.info("Daemon stopped. Total trades for %s: %d", pair, total)
+
+
+TRADE_BATCH = 100_000  # Trades per DB fetch for bar construction
+
+
+def build_bars(
+    builder: BarBuilder,
+    db: Database,
+    pair: str,
+    source: str = "coinbase",
+) -> int:
+    """Build bars from stored trades using the given builder.
+
+    Loads trades in batches from the database, processes them through
+    the bar builder, and stores completed bars. Resumable — on restart,
+    starts from the last emitted bar's time_end.
+
+    Args:
+        builder: Configured BarBuilder instance.
+        db: Database with stored trades.
+        pair: Trading pair, e.g. 'ETH-USD'.
+        source: Data source name.
+
+    Returns:
+        Total number of bars emitted and stored.
+    """
+    shutdown = GracefulShutdown()
+
+    # Resume from last emitted bar, or start from first trade
+    last_bar_time = db.get_last_bar_time(builder.bar_type, pair, source)
+    if last_bar_time:
+        since = last_bar_time
+        logger.info(
+            "Resuming %s bar construction from %s",
+            builder.bar_type,
+            since.isoformat(),
+        )
+    else:
+        first_ts = db.get_first_timestamp(pair, source)
+        if first_ts is None:
+            logger.error("No trades found for %s. Run 'arcana ingest' first.", pair)
+            return 0
+        # Subtract 1µs so the first trade is included (query uses timestamp > since)
+        since = first_ts - timedelta(microseconds=1)
+        logger.info(
+            "Building %s bars from first trade at %s",
+            builder.bar_type,
+            first_ts.isoformat(),
+        )
+
+    total_bars = 0
+    total_trades = 0
+    start_time = time_mod.time()
+
+    while not shutdown.should_stop:
+        trades = db.get_trades_since(pair, since, source, limit=TRADE_BATCH)
+        if not trades:
+            break
+
+        bars = builder.process_trades(trades)
+        if bars:
+            db.insert_bars(bars)
+            total_bars += len(bars)
+
+        total_trades += len(trades)
+        since = trades[-1].timestamp
+
+        elapsed = time_mod.time() - start_time
+        rate = total_trades / elapsed if elapsed > 0 else 0
+        logger.info(
+            "Processed %d trades | %d bars emitted | %.0f trades/sec",
+            total_trades,
+            total_bars,
+            rate,
+        )
+
+        # Under limit means we've consumed all available trades
+        if len(trades) < TRADE_BATCH:
+            break
+
+    # Flush partial bar at end
+    if not shutdown.should_stop:
+        final_bar = builder.flush()
+        if final_bar:
+            db.insert_bars([final_bar])
+            total_bars += 1
+
+    elapsed = time_mod.time() - start_time
+    logger.info(
+        "Bar construction complete: %d %s bars from %d trades in %s",
+        total_bars,
+        builder.bar_type,
+        total_trades,
+        _format_eta(elapsed),
+    )
+    return total_bars
 
 
 def _format_eta(seconds: float) -> str:
