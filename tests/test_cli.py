@@ -162,3 +162,29 @@ class TestParseBarSpec:
 
         with pytest.raises(click.exceptions.BadParameter, match="Invalid bar spec"):
             _parse_bar_spec("invalid", "coinbase", "ETH-USD")
+
+    # ── Information-driven bar specs ─────────────────────────────────
+
+    def test_tib_spec(self):
+        builder = _parse_bar_spec("tib_20", "coinbase", "ETH-USD")
+        assert builder.bar_type == "tib_20"
+
+    def test_vib_spec(self):
+        builder = _parse_bar_spec("vib_10", "coinbase", "ETH-USD")
+        assert builder.bar_type == "vib_10"
+
+    def test_dib_spec(self):
+        builder = _parse_bar_spec("dib_50", "coinbase", "ETH-USD")
+        assert builder.bar_type == "dib_50"
+
+    def test_trb_spec(self):
+        builder = _parse_bar_spec("trb_10", "coinbase", "ETH-USD")
+        assert builder.bar_type == "trb_10"
+
+    def test_vrb_spec(self):
+        builder = _parse_bar_spec("vrb_20", "coinbase", "ETH-USD")
+        assert builder.bar_type == "vrb_20"
+
+    def test_drb_spec(self):
+        builder = _parse_bar_spec("drb_30", "coinbase", "ETH-USD")
+        assert builder.bar_type == "drb_30"

@@ -223,12 +223,24 @@ def status(
 
 _TIME_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 _BAR_SPEC_PATTERN = re.compile(
-    r"^(tick|volume|dollar)_(\d+(?:\.\d+)?)$|^time_(\d+)([smhd])$"
+    r"^(tick|volume|dollar)_(\d+(?:\.\d+)?)$"
+    r"|^time_(\d+)([smhd])$"
+    r"|^(tib|vib|dib|trb|vrb|drb)_(\d+)$"
 )
 
 
 def _parse_bar_spec(spec: str, source: str, pair: str) -> "BarBuilder":
-    """Parse a bar spec string like 'tick_500' or 'time_5m' into a BarBuilder."""
+    """Parse a bar spec string like 'tick_500' or 'tib_20' into a BarBuilder."""
+    from arcana.bars.imbalance import (
+        DollarImbalanceBarBuilder,
+        TickImbalanceBarBuilder,
+        VolumeImbalanceBarBuilder,
+    )
+    from arcana.bars.runs import (
+        DollarRunBarBuilder,
+        TickRunBarBuilder,
+        VolumeRunBarBuilder,
+    )
     from arcana.bars.standard import (
         DollarBarBuilder,
         TickBarBuilder,
@@ -240,12 +252,13 @@ def _parse_bar_spec(spec: str, source: str, pair: str) -> "BarBuilder":
     if not m:
         raise click.BadParameter(
             f"Invalid bar spec '{spec}'. "
-            "Expected: tick_N, volume_N, dollar_N, or time_Nu "
-            "(where u is s/m/h/d). Examples: tick_500, time_5m, dollar_50000",
+            "Expected: tick_N, volume_N, dollar_N, time_Nu, "
+            "tib_N, vib_N, dib_N, trb_N, vrb_N, or drb_N. "
+            "Examples: tick_500, time_5m, dollar_50000, tib_20, trb_10",
             param_hint="'BAR_SPEC'",
         )
 
-    if m.group(1):  # tick, volume, or dollar
+    if m.group(1):  # tick, volume, or dollar (standard)
         bar_type = m.group(1)
         value = m.group(2)
         if bar_type == "tick":
@@ -254,10 +267,22 @@ def _parse_bar_spec(spec: str, source: str, pair: str) -> "BarBuilder":
             return VolumeBarBuilder(source, pair, threshold=Decimal(value))
         else:
             return DollarBarBuilder(source, pair, threshold=Decimal(value))
-    else:  # time
+    elif m.group(3):  # time
         amount = int(m.group(3))
         unit = _TIME_UNITS[m.group(4)]
         return TimeBarBuilder(source, pair, interval=timedelta(**{unit: amount}))
+    else:  # information-driven (imbalance or run)
+        bar_kind = m.group(5)
+        ewma_window = int(m.group(6))
+        builder_map = {
+            "tib": TickImbalanceBarBuilder,
+            "vib": VolumeImbalanceBarBuilder,
+            "dib": DollarImbalanceBarBuilder,
+            "trb": TickRunBarBuilder,
+            "vrb": VolumeRunBarBuilder,
+            "drb": DollarRunBarBuilder,
+        }
+        return builder_map[bar_kind](source, pair, ewma_window=ewma_window)
 
 
 @cli.group()
@@ -288,10 +313,20 @@ def bars_build(
     BAR_SPEC defines the bar type and threshold:
 
     \b
-      tick_500      500-trade bars
-      volume_100    100-unit volume bars
-      dollar_50000  $50k notional bars
-      time_5m       5-minute time bars (s/m/h/d)
+      Standard (fixed threshold):
+        tick_500      500-trade bars
+        volume_100    100-unit volume bars
+        dollar_50000  $50k notional bars
+        time_5m       5-minute time bars (s/m/h/d)
+
+    \b
+      Information-driven (EWMA adaptive):
+        tib_20        Tick imbalance bars (EWMA window=20)
+        vib_20        Volume imbalance bars
+        dib_20        Dollar imbalance bars
+        trb_10        Tick run bars (EWMA window=10)
+        vrb_10        Volume run bars
+        drb_10        Dollar run bars
 
     Resumes automatically from the last built bar.
 
@@ -299,7 +334,8 @@ def bars_build(
     Examples:
       arcana bars build tick_500 ETH-USD
       arcana bars build time_1h ETH-USD
-      arcana bars build dollar_50000 ETH-USD
+      arcana bars build tib_20 ETH-USD
+      arcana bars build drb_10 ETH-USD
     """
     builder = _parse_bar_spec(bar_spec, source="coinbase", pair=pair)
     config = _db_config_from_options(host, port, database, user, password)
