@@ -11,7 +11,7 @@ import pytest
 from arcana.bars.standard import TickBarBuilder
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.ingestion.models import Trade
-from arcana.pipeline import BATCH_SIZE, _format_eta, build_bars, ingest_backfill
+from arcana.pipeline import BATCH_SIZE, _format_eta, build_bars, ingest_backfill, run_daemon
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -270,6 +270,22 @@ class TestBuildBars:
         # The flush should produce 1 bar
         assert total == 1
         assert db.insert_bars.called
+
+
+class TestRunDaemon:
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_daemon_raises_when_no_data(self, mock_shutdown):
+        """Daemon should raise RuntimeError if no trades exist."""
+        mock_shutdown.return_value.should_stop = False
+
+        source = MagicMock(spec=CoinbaseSource)
+        source.name = "coinbase"
+
+        db = MagicMock()
+        db.get_last_timestamp.return_value = None
+
+        with pytest.raises(RuntimeError, match="No trades found"):
+            run_daemon(source, db, "ETH-USD")
 
 
 class TestFormatEta:

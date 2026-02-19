@@ -167,8 +167,12 @@ def run(
     click.echo(f"Starting daemon for {pair} (poll every {interval}s)...")
     click.echo("Press Ctrl+C to stop.")
 
-    with CoinbaseSource() as source, Database(config) as db_conn:
-        run_daemon(source, db_conn, pair, interval=interval)
+    try:
+        with CoinbaseSource() as source, Database(config) as db_conn:
+            run_daemon(source, db_conn, pair, interval=interval)
+    except RuntimeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
 
     click.echo("Daemon stopped.")
 

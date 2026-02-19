@@ -177,12 +177,10 @@ def run_daemon(
 
     last_ts = db.get_last_timestamp(pair, source.name)
     if last_ts is None:
-        logger.error(
-            "No data found for %s. Run 'arcana ingest %s --since <date>' first.",
-            pair,
-            pair,
+        raise RuntimeError(
+            f"No trades found for {pair}. "
+            f"Run 'arcana ingest {pair} --since <date>' first."
         )
-        return
 
     logger.info(
         "Daemon starting for %s %s | Last trade: %s | Poll interval: %ds",
