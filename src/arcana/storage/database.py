@@ -536,6 +536,27 @@ class Database:
             row = cur.fetchone()
             return row[0] if row else 0
 
+    def get_dollar_volume_stats(
+        self, pair: str, source: str = "coinbase"
+    ) -> tuple[float, float] | None:
+        """Get total dollar volume and time span in days for a pair.
+
+        Returns:
+            (total_dollar_volume, days) or None if no trades exist.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT SUM(price * size)::float, "
+                "EXTRACT(epoch FROM MAX(timestamp) - MIN(timestamp)) / 86400.0 "
+                "FROM raw_trades WHERE pair = %s AND source = %s",
+                (pair, source),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None and row[1] is not None and row[1] > 0:
+                return (row[0], row[1])
+            return None
+
     def close(self) -> None:
         if self._conn and not self._conn.closed:
             self._conn.close()

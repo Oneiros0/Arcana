@@ -232,6 +232,56 @@ def run_daemon(
     logger.info("Daemon stopped. Total trades for %s: %d", pair, total)
 
 
+def calibrate_dollar_threshold(
+    db: Database,
+    pair: str,
+    bars_per_day: int = 50,
+    source: str = "coinbase",
+) -> int:
+    """Auto-calibrate dollar bar threshold from trade data.
+
+    Computes: threshold = total_dollar_volume / (days × bars_per_day)
+
+    Args:
+        db: Database with stored trades.
+        pair: Trading pair, e.g. 'ETH-USD'.
+        bars_per_day: Target number of bars per calendar day.
+        source: Data source name.
+
+    Returns:
+        Dollar threshold rounded to a clean value.
+
+    Raises:
+        ValueError: If no trade data exists for the pair.
+    """
+    stats = db.get_dollar_volume_stats(pair, source)
+    if stats is None:
+        raise ValueError(f"No trade data for {pair}. Run 'arcana ingest' first.")
+
+    total_dollar_vol, days = stats
+    target_bars = days * bars_per_day
+    raw_threshold = total_dollar_vol / target_bars
+
+    # Round to a clean value (nearest power-of-10 significant digit)
+    # e.g. 213847 → 200000, 58312 → 50000
+    import math
+
+    magnitude = 10 ** int(math.log10(raw_threshold))
+    threshold = round(raw_threshold / magnitude) * magnitude
+
+    logger.info(
+        "Calibrated dollar threshold for %s: $%s "
+        "(%.1f days, $%.0fM total vol, target %d bars/day → ~%d total bars)",
+        pair,
+        f"{threshold:,}",
+        days,
+        total_dollar_vol / 1e6,
+        bars_per_day,
+        int(total_dollar_vol / threshold),
+    )
+    return threshold
+
+
 TRADE_BATCH = 100_000  # Trades per DB fetch for bar construction
 
 

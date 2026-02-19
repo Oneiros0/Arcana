@@ -188,3 +188,43 @@ class TestParseBarSpec:
     def test_drb_spec(self):
         builder = _parse_bar_spec("drb_30", "coinbase", "ETH-USD")
         assert builder.bar_type == "drb_30"
+
+    # ── Auto-calibrated dollar bars ──────────────────────────────────
+
+    def test_dollar_auto_spec(self):
+        db = MagicMock()
+        db.get_dollar_volume_stats.return_value = (10_000_000.0, 10.0)
+        builder = _parse_bar_spec("dollar_auto", "coinbase", "ETH-USD", db=db)
+        # 10M / (10 days * 50 bars/day) = 20,000
+        assert builder.bar_type == "dollar_20000"
+
+    def test_dollar_auto_with_bars_per_day(self):
+        db = MagicMock()
+        db.get_dollar_volume_stats.return_value = (10_000_000.0, 10.0)
+        builder = _parse_bar_spec("dollar_auto_100", "coinbase", "ETH-USD", db=db)
+        # 10M / (10 * 100) = 10,000
+        assert builder.bar_type == "dollar_10000"
+
+    def test_dollar_auto_requires_db(self):
+        import click
+
+        with pytest.raises(click.exceptions.UsageError, match="database connection"):
+            _parse_bar_spec("dollar_auto", "coinbase", "ETH-USD")
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    @patch("arcana.cli.calibrate_dollar_threshold")
+    def test_bars_build_dollar_auto_command(self, mock_calibrate, mock_build_bars, mock_db_cls):
+        mock_calibrate.return_value = 200_000
+        mock_build_bars.return_value = 250
+
+        mock_db = MagicMock()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build", "dollar_auto", "ETH-USD"])
+
+        assert result.exit_code == 0
+        assert "250 bars built" in result.output
+        mock_calibrate.assert_called_once()
