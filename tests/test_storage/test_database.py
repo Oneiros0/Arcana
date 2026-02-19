@@ -60,10 +60,7 @@ class TestBarTableName:
 
     def test_case_insensitive_pair(self):
         """ETH-USD and eth-usd produce the same table name."""
-        assert (
-            _bar_table_name("tick_500", "ETH-USD")
-            == _bar_table_name("tick_500", "eth-usd")
-        )
+        assert _bar_table_name("tick_500", "ETH-USD") == _bar_table_name("tick_500", "eth-usd")
 
     def test_rejects_invalid_pair_no_dash(self):
         with pytest.raises(ValueError, match="pair"):

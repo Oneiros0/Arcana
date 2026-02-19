@@ -251,7 +251,7 @@ class TestFetchAllTrades:
         source._client = MagicMock()
         source._client.get.side_effect = [
             _mock_response({"trades": newer + boundary}),  # page 1: at limit
-            _mock_response({"trades": boundary + older}),   # page 2: overlap + older
+            _mock_response({"trades": boundary + older}),  # page 2: overlap + older
         ]
 
         start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
