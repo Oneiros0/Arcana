@@ -30,6 +30,7 @@ if sys.platform == "win32":
 # ── Configuration ─────────────────────────────────────────────────────────
 PAIR = "ETH-USD"
 MONTHS_BACK = 6
+CHUNK_DAYS = 10  # days per backfill chunk (keep under 2h timeout)
 DAEMON_INTERVAL = 900  # 15 minutes
 MAX_RETRIES = 5
 RETRY_DELAY = 30  # seconds between retries
@@ -175,12 +176,12 @@ def ingest_chunk(since: str, until: str, chunk_label: str) -> tuple[bool, int]:
     return False, 0
 
 
-def generate_monthly_chunks(start: datetime, end: datetime) -> list[tuple[str, str, str]]:
-    """Generate (since, until, label) tuples for monthly chunks."""
+def generate_chunks(start: datetime, end: datetime) -> list[tuple[str, str, str]]:
+    """Generate (since, until, label) tuples for backfill chunks."""
     chunks = []
     current = start
     while current < end:
-        chunk_end = min(current + timedelta(days=30), end)
+        chunk_end = min(current + timedelta(days=CHUNK_DAYS), end)
         since_str = current.strftime("%Y-%m-%dT%H:%M:%S")
         until_str = chunk_end.strftime("%Y-%m-%dT%H:%M:%S")
         label = f"{current.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')}"
@@ -234,13 +235,13 @@ def main() -> int:
         return 1
 
     # ── 2. Monthly backfill ───────────────────────────────────────────
-    log_section("2. BACKFILL (month-by-month)")
+    log_section(f"2. BACKFILL ({CHUNK_DAYS}-day chunks)")
 
     now = datetime.now(UTC)
     start = now - timedelta(days=MONTHS_BACK * 30)
-    chunks = generate_monthly_chunks(start, now)
+    chunks = generate_chunks(start, now)
 
-    log(f"  {len(chunks)} monthly chunks to process")
+    log(f"  {len(chunks)} chunks to process ({CHUNK_DAYS} days each)")
     log(f"  {start.strftime('%Y-%m-%d')} -> {now.strftime('%Y-%m-%d')}")
     log("")
 
