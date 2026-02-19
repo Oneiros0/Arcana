@@ -124,7 +124,7 @@ def ingest_backfill(
         elapsed = time_mod.time() - start_time
         rate = total_inserted / elapsed if elapsed > 0 else 0
         remaining_windows = total_windows - window_num
-        eta_seconds = remaining_windows / (window_num / elapsed) if window_num > 0 else 0
+        eta_seconds = (remaining_windows * elapsed / window_num) if elapsed > 0 else 0
 
         logger.info(
             "Window %d/%d | %s → %s | %d trades this window | "
