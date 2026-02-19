@@ -87,8 +87,8 @@ class TestIngestBackfill:
     @patch("arcana.pipeline.GracefulShutdown")
     @patch("arcana.pipeline.time_mod.sleep")
     def test_backfill_resume_scoped_to_until(self, mock_sleep, mock_shutdown):
-        """Resume query should be bounded by `until` so swarm workers
-        don't see trades outside their assigned range."""
+        """Resume query should be bounded by `until` so backfill
+        doesn't see trades outside the requested range."""
         mock_shutdown.return_value.should_stop = False
 
         source = MagicMock(spec=CoinbaseSource)
