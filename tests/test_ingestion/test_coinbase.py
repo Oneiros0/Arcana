@@ -1,15 +1,14 @@
 """Tests for Coinbase Advanced Trade API client."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
-import pytest
 
-from arcana.ingestion.coinbase import CoinbaseSource, DEFAULT_LIMIT
+from arcana.ingestion.coinbase import DEFAULT_LIMIT, CoinbaseSource
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
@@ -107,8 +106,8 @@ class TestCoinbaseSource:
         source._client = MagicMock()
         source._client.get.return_value = _mock_response(fixture)
 
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=UTC)
         source.fetch_trades("ETH-USD", start=start, end=end, limit=100)
 
         call_args = source._client.get.call_args
@@ -183,8 +182,8 @@ class TestFetchAllTrades:
         source._client = MagicMock()
         source._client.get.return_value = _mock_response({"trades": raw})
 
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=UTC)
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
@@ -206,8 +205,8 @@ class TestFetchAllTrades:
             _mock_response({"trades": page2}),
         ]
 
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=UTC)
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
@@ -229,8 +228,8 @@ class TestFetchAllTrades:
             _mock_response({"trades": page3}),
         ]
 
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=UTC)
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
@@ -255,8 +254,8 @@ class TestFetchAllTrades:
             _mock_response({"trades": boundary + older}),   # page 2: overlap + older
         ]
 
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=UTC)
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
@@ -277,8 +276,8 @@ class TestFetchAllTrades:
         # Always returns the same trades — second page is all dupes
         source._client.get.return_value = _mock_response({"trades": same_trades})
 
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=UTC)
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 
@@ -300,8 +299,8 @@ class TestFetchAllTrades:
             _mock_response({"trades": page2}),
         ]
 
-        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
-        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
+        end = datetime(2026, 2, 10, 15, 0, 0, tzinfo=UTC)
 
         trades = source.fetch_all_trades("ETH-USD", start, end)
 

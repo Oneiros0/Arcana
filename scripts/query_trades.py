@@ -11,8 +11,6 @@ will consume.
 import argparse
 import statistics
 import sys
-from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
 import psycopg
@@ -107,7 +105,7 @@ def main() -> None:
         dv = price * size
         print(f"  {str(ts):<32} {side:>4}  {price:>12.2f}  {size:>14.8f}  {dv:>14.2f}")
 
-    print(f"\nLast 10:")
+    print("\nLast 10:")
     print(f"  {'timestamp':<32} {'side':>4}  {'price':>12}  {'size':>14}  {'dollar_vol':>14}")
     print(f"  {'-'*32} {'-'*4}  {'-'*12}  {'-'*14}  {'-'*14}")
     for ts, tid, price, size, side in rows[-10:]:
@@ -163,7 +161,7 @@ def main() -> None:
         print(f"Span:    {total_span / 3600:.2f} hours")
         if total_span > 0:
             print(f"Rate:    {len(rows) / (total_span / 60):.1f} trades/min")
-        print(f"Inter-trade time:")
+        print("Inter-trade time:")
         print(f"  Min:    {min(deltas):.3f}s")
         print(f"  Mean:   {statistics.mean(deltas):.3f}s")
         print(f"  Median: {statistics.median(deltas):.3f}s")
@@ -223,7 +221,7 @@ def main() -> None:
         rate = len(rows) / (total_span / 60)
         est_daily = rate * 60 * 24
         print(f"\nEstimated daily volume: ~{est_daily:,.0f} trades/day")
-        print(f"\nSuggested bar thresholds (~50 bars/day):")
+        print("\nSuggested bar thresholds (~50 bars/day):")
         print(f"  Tick bars:   {max(1, int(est_daily / 50)):,} trades/bar")
         est_vol_daily = sum(sizes) / (total_span / 86400)
         est_dollar_daily = sum(dollar_vols) / (total_span / 86400)

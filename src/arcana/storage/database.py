@@ -545,7 +545,7 @@ class Database:
         if self._conn and not self._conn.closed:
             self._conn.close()
 
-    def __enter__(self) -> "Database":
+    def __enter__(self) -> Database:
         self.connect()
         return self
 

@@ -244,21 +244,6 @@ The EWMA window controls how quickly the adaptive threshold responds to changes.
 
 ---
 
-## Docker
-
-```bash
-# Build
-docker build -t arcana .
-
-# Run ingestion
-docker run --rm --network host arcana ingest ETH-USD --since 2025-01-01
-
-# Run daemon
-docker run -d --network host --name arcana-daemon arcana run ETH-USD
-```
-
----
-
 ## Project Structure
 
 ```
