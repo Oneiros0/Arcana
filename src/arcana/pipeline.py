@@ -178,8 +178,7 @@ def run_daemon(
     last_ts = db.get_last_timestamp(pair, source.name)
     if last_ts is None:
         raise RuntimeError(
-            f"No trades found for {pair}. "
-            f"Run 'arcana ingest {pair} --since <date>' first."
+            f"No trades found for {pair}. Run 'arcana ingest {pair} --since <date>' first."
         )
 
     logger.info(
@@ -304,7 +303,11 @@ def build_bars(
 
     while not shutdown.should_stop:
         trades = db.get_trades_since(
-            pair, since, source, limit=TRADE_BATCH, since_trade_id=since_trade_id,
+            pair,
+            since,
+            source,
+            limit=TRADE_BATCH,
+            since_trade_id=since_trade_id,
         )
         if not trades:
             break

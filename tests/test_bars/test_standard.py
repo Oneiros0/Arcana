@@ -37,6 +37,7 @@ def _trade(
 
 # ── Tick Bars ──────────────────────────────────────────────────────────
 
+
 class TestTickBarBuilder:
     def test_bar_type_label(self):
         b = TickBarBuilder("coinbase", "ETH-USD", threshold=500)
@@ -69,10 +70,10 @@ class TestTickBarBuilder:
     def test_ohlcv_correctness(self):
         builder = TickBarBuilder("coinbase", "ETH-USD", threshold=4)
         trades = [
-            _trade(0, "100.00", "1.0"),   # open
-            _trade(1, "110.00", "2.0"),   # high
-            _trade(2, "90.00", "0.5"),    # low
-            _trade(3, "105.00", "1.5"),   # close
+            _trade(0, "100.00", "1.0"),  # open
+            _trade(1, "110.00", "2.0"),  # high
+            _trade(2, "90.00", "0.5"),  # low
+            _trade(3, "105.00", "1.5"),  # close
         ]
         bars = builder.process_trades(trades)
 
@@ -115,6 +116,7 @@ class TestTickBarBuilder:
 
 # ── Volume Bars ────────────────────────────────────────────────────────
 
+
 class TestVolumeBarBuilder:
     def test_bar_type_label(self):
         b = VolumeBarBuilder("coinbase", "ETH-USD", threshold="10.0")
@@ -123,10 +125,10 @@ class TestVolumeBarBuilder:
     def test_emits_at_volume_threshold(self):
         builder = VolumeBarBuilder("coinbase", "ETH-USD", threshold="5.0")
         trades = [
-            _trade(0, "100", "2.0"),   # cumulative: 2.0
-            _trade(1, "100", "1.5"),   # cumulative: 3.5
-            _trade(2, "100", "2.0"),   # cumulative: 5.5 >= 5.0 → emit
-            _trade(3, "100", "1.0"),   # new bar starts
+            _trade(0, "100", "2.0"),  # cumulative: 2.0
+            _trade(1, "100", "1.5"),  # cumulative: 3.5
+            _trade(2, "100", "2.0"),  # cumulative: 5.5 >= 5.0 → emit
+            _trade(3, "100", "1.0"),  # new bar starts
         ]
         bars = builder.process_trades(trades)
 
@@ -146,11 +148,11 @@ class TestVolumeBarBuilder:
     def test_multiple_volume_bars(self):
         builder = VolumeBarBuilder("coinbase", "ETH-USD", threshold="3.0")
         trades = [
-            _trade(0, "100", "2.0"),   # bar 1: 2.0
-            _trade(1, "100", "2.0"),   # bar 1: 4.0 >= 3 → emit
-            _trade(2, "100", "1.0"),   # bar 2: 1.0
-            _trade(3, "100", "1.0"),   # bar 2: 2.0
-            _trade(4, "100", "1.5"),   # bar 2: 3.5 >= 3 → emit
+            _trade(0, "100", "2.0"),  # bar 1: 2.0
+            _trade(1, "100", "2.0"),  # bar 1: 4.0 >= 3 → emit
+            _trade(2, "100", "1.0"),  # bar 2: 1.0
+            _trade(3, "100", "1.0"),  # bar 2: 2.0
+            _trade(4, "100", "1.5"),  # bar 2: 3.5 >= 3 → emit
         ]
         bars = builder.process_trades(trades)
 
@@ -161,6 +163,7 @@ class TestVolumeBarBuilder:
 
 # ── Dollar Bars ────────────────────────────────────────────────────────
 
+
 class TestDollarBarBuilder:
     def test_bar_type_label(self):
         b = DollarBarBuilder("coinbase", "ETH-USD", threshold="50000")
@@ -169,9 +172,9 @@ class TestDollarBarBuilder:
     def test_emits_at_dollar_threshold(self):
         builder = DollarBarBuilder("coinbase", "ETH-USD", threshold="500")
         trades = [
-            _trade(0, "100", "2.0"),   # $200
-            _trade(1, "100", "1.5"),   # $350
-            _trade(2, "100", "2.0"),   # $550 >= $500 → emit
+            _trade(0, "100", "2.0"),  # $200
+            _trade(1, "100", "1.5"),  # $350
+            _trade(2, "100", "2.0"),  # $550 >= $500 → emit
         ]
         bars = builder.process_trades(trades)
 
@@ -182,9 +185,9 @@ class TestDollarBarBuilder:
         """Higher prices fill the dollar threshold faster."""
         builder = DollarBarBuilder("coinbase", "ETH-USD", threshold="1000")
         trades = [
-            _trade(0, "200", "2.0"),   # $400
-            _trade(1, "300", "1.0"),   # $700
-            _trade(2, "400", "1.0"),   # $1100 >= $1000 → emit
+            _trade(0, "200", "2.0"),  # $400
+            _trade(1, "300", "1.0"),  # $700
+            _trade(2, "400", "1.0"),  # $1100 >= $1000 → emit
         ]
         bars = builder.process_trades(trades)
 
@@ -194,6 +197,7 @@ class TestDollarBarBuilder:
 
 
 # ── Time Bars ──────────────────────────────────────────────────────────
+
 
 class TestTimeBarBuilder:
     def test_bar_type_labels(self):
@@ -209,9 +213,9 @@ class TestTimeBarBuilder:
 
         # All in the 14:00-14:05 bucket
         trades_bucket_1 = [
-            _trade(0, "100", "1.0"),     # 14:00:00
-            _trade(60, "101", "1.0"),    # 14:01:00
-            _trade(120, "102", "1.0"),   # 14:02:00
+            _trade(0, "100", "1.0"),  # 14:00:00
+            _trade(60, "101", "1.0"),  # 14:01:00
+            _trade(120, "102", "1.0"),  # 14:02:00
         ]
         bars = builder.process_trades(trades_bucket_1)
         assert len(bars) == 0  # no emission yet — bucket not closed
@@ -227,11 +231,11 @@ class TestTimeBarBuilder:
     def test_multiple_buckets(self):
         builder = TimeBarBuilder("coinbase", "ETH-USD", timedelta(minutes=5))
         trades = [
-            _trade(0, "100", "1.0"),      # 14:00 bucket
-            _trade(60, "101", "1.0"),     # 14:00 bucket
-            _trade(300, "102", "1.0"),    # 14:05 bucket → emits 14:00
-            _trade(600, "103", "1.0"),    # 14:10 bucket → emits 14:05
-            _trade(900, "104", "1.0"),    # 14:15 bucket → emits 14:10
+            _trade(0, "100", "1.0"),  # 14:00 bucket
+            _trade(60, "101", "1.0"),  # 14:00 bucket
+            _trade(300, "102", "1.0"),  # 14:05 bucket → emits 14:00
+            _trade(600, "103", "1.0"),  # 14:10 bucket → emits 14:05
+            _trade(900, "104", "1.0"),  # 14:15 bucket → emits 14:10
         ]
         bars = builder.process_trades(trades)
 
@@ -252,8 +256,8 @@ class TestTimeBarBuilder:
         """A gap from 14:00 to 14:30 should not produce empty bars."""
         builder = TimeBarBuilder("coinbase", "ETH-USD", timedelta(minutes=5))
         trades = [
-            _trade(0, "100", "1.0"),       # 14:00 bucket
-            _trade(1800, "105", "1.0"),    # 14:30 bucket → emits 14:00 only
+            _trade(0, "100", "1.0"),  # 14:00 bucket
+            _trade(1800, "105", "1.0"),  # 14:30 bucket → emits 14:00 only
         ]
         bars = builder.process_trades(trades)
 
@@ -264,9 +268,9 @@ class TestTimeBarBuilder:
         """Bars should align to clock boundaries, not trade arrival times."""
         builder = TimeBarBuilder("coinbase", "ETH-USD", timedelta(minutes=5))
         # Trade at 14:03:45 — belongs to 14:00-14:05 bucket
-        t1 = _trade(225, "100", "1.0")   # 14:03:45
+        t1 = _trade(225, "100", "1.0")  # 14:03:45
         # Trade at 14:07:30 — belongs to 14:05-14:10 bucket
-        t2 = _trade(450, "101", "1.0")   # 14:07:30
+        t2 = _trade(450, "101", "1.0")  # 14:07:30
 
         bars = builder.process_trades([t1, t2])
         assert len(bars) == 1  # 14:00 bucket emitted

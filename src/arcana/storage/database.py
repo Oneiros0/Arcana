@@ -368,8 +368,7 @@ class Database:
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT MAX(time_end) FROM {table_name} "
-                "WHERE pair = %s AND source = %s",
+                f"SELECT MAX(time_end) FROM {table_name} WHERE pair = %s AND source = %s",
                 (pair, source),
             )
             row = cur.fetchone()
@@ -397,21 +396,21 @@ class Database:
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
-                f"DELETE FROM {table_name} "
-                "WHERE pair = %s AND source = %s AND time_start >= %s",
+                f"DELETE FROM {table_name} WHERE pair = %s AND source = %s AND time_start >= %s",
                 (pair, source, since),
             )
             deleted = cur.rowcount
         conn.commit()
         logger.debug(
             "Deleted %d %s bars for %s from %s onward",
-            deleted, bar_type, pair, since.isoformat(),
+            deleted,
+            bar_type,
+            pair,
+            since.isoformat(),
         )
         return deleted
 
-    def get_bar_count(
-        self, bar_type: str | None = None, pair: str | None = None
-    ) -> int:
+    def get_bar_count(self, bar_type: str | None = None, pair: str | None = None) -> int:
         """Get bar count, optionally filtered by type and/or pair.
 
         When both bar_type and pair are given, queries the specific
@@ -511,9 +510,7 @@ class Database:
             for r in rows
         ]
 
-    def get_first_timestamp(
-        self, pair: str, source: str = "coinbase"
-    ) -> datetime | None:
+    def get_first_timestamp(self, pair: str, source: str = "coinbase") -> datetime | None:
         """Get the earliest trade timestamp for a pair.
 
         Used by bar builders to determine where to start construction
@@ -533,9 +530,7 @@ class Database:
         conn = self.connect()
         with conn.cursor() as cur:
             if pair:
-                cur.execute(
-                    "SELECT COUNT(*) FROM raw_trades WHERE pair = %s", (pair,)
-                )
+                cur.execute("SELECT COUNT(*) FROM raw_trades WHERE pair = %s", (pair,))
             else:
                 cur.execute("SELECT COUNT(*) FROM raw_trades")
             row = cur.fetchone()

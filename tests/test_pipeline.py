@@ -54,7 +54,11 @@ class TestIngestBackfill:
         since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=UTC)
         # Use a window large enough to cover since→now in a single window
         total = ingest_backfill(
-            source, db, "ETH-USD", since, window=timedelta(days=7),
+            source,
+            db,
+            "ETH-USD",
+            since,
+            window=timedelta(days=7),
         )
 
         assert total == 10
@@ -101,9 +105,7 @@ class TestIngestBackfill:
         db = MagicMock()
         # Simulate: global max is Feb 12 (from another worker), but
         # within this worker's range the max is Feb 3
-        db.get_last_timestamp.return_value = datetime(
-            2026, 2, 3, 12, 0, 0, tzinfo=UTC
-        )
+        db.get_last_timestamp.return_value = datetime(2026, 2, 3, 12, 0, 0, tzinfo=UTC)
         db.insert_trades.return_value = 5
 
         since = datetime(2026, 2, 3, 0, 0, 0, tzinfo=UTC)
@@ -209,11 +211,17 @@ class TestBuildBars:
 
         # Should delete stale bars from resume point before rebuilding
         db.delete_bars_since.assert_called_once_with(
-            "tick_5", "ETH-USD", last_bar_time, "coinbase",
+            "tick_5",
+            "ETH-USD",
+            last_bar_time,
+            "coinbase",
         )
         # Should query trades starting from last bar time, not first trade
         db.get_trades_since.assert_called_once_with(
-            "ETH-USD", last_bar_time, "coinbase", limit=100_000,
+            "ETH-USD",
+            last_bar_time,
+            "coinbase",
+            limit=100_000,
             since_trade_id=None,
         )
         db.get_first_timestamp.assert_not_called()
@@ -240,9 +248,7 @@ class TestBuildBars:
 
         # First batch exactly at TRADE_BATCH (10) triggers pagination
         batch1 = _make_trades(10)
-        batch2 = _make_trades(
-            5, start_ts=datetime(2026, 2, 10, 12, 0, 10, tzinfo=UTC)
-        )
+        batch2 = _make_trades(5, start_ts=datetime(2026, 2, 10, 12, 0, 10, tzinfo=UTC))
 
         db = MagicMock()
         db.get_last_bar_time.return_value = None
@@ -276,7 +282,6 @@ class TestBuildBars:
         # The flush should produce 1 bar
         assert total == 1
         assert db.insert_bars.called
-
 
     @patch("arcana.pipeline.GracefulShutdown")
     def test_build_bars_restores_ewma_state(self, mock_shutdown):

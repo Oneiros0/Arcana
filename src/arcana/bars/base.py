@@ -109,11 +109,7 @@ class Accumulator:
         assert self._open is not None and self._close is not None
         assert self._high is not None and self._low is not None
 
-        vwap = (
-            self._price_x_volume / self._volume
-            if self._volume > 0
-            else self._close
-        )
+        vwap = self._price_x_volume / self._volume if self._volume > 0 else self._close
 
         return Bar(
             time_start=self.time_start,
@@ -184,7 +180,10 @@ class BarBuilder(ABC):
         if self._acc.tick_count > 0:
             metadata = self._flush_metadata()
             bar = self._acc.to_bar(
-                self.bar_type, self._source, self._pair, metadata=metadata,
+                self.bar_type,
+                self._source,
+                self._pair,
+                metadata=metadata,
             )
             self._acc = Accumulator()
             return bar
@@ -193,7 +192,10 @@ class BarBuilder(ABC):
     def _emit_and_reset(self, metadata: dict | None = None) -> Bar:
         """Emit the current bar and start a fresh accumulator."""
         bar = self._acc.to_bar(
-            self.bar_type, self._source, self._pair, metadata=metadata,
+            self.bar_type,
+            self._source,
+            self._pair,
+            metadata=metadata,
         )
         self._acc = Accumulator()
         return bar

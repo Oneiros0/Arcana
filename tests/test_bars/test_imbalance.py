@@ -205,9 +205,9 @@ class TestDollarImbalanceBarBuilder:
         """Buy at $200 x 5.0 = +$1000, sell at $100 x 5.0 = -$500."""
         builder = DollarImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=5)
         trades = [
-            _trade(0, "200.00", "5.0", side="buy"),   # +$1000
-            _trade(1, "100.00", "5.0", side="sell"),   # -$500, net +$500
-            _trade(2, "200.00", "5.0", side="buy"),    # +$1000, net +$1500
+            _trade(0, "200.00", "5.0", side="buy"),  # +$1000
+            _trade(1, "100.00", "5.0", side="sell"),  # -$500, net +$500
+            _trade(2, "200.00", "5.0", side="buy"),  # +$1000, net +$1500
         ]
         bars = builder.process_trades(trades)
         assert len(bars) >= 1
