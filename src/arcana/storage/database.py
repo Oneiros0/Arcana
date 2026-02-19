@@ -180,7 +180,7 @@ class Database:
 
         Used by the daemon and backfill to know where to resume.
         When *before* is set, only considers trades at or before that
-        timestamp — essential for swarm workers that own a sub-range.
+        timestamp — useful for bounded backfill ranges.
         """
         conn = self.connect()
         with conn.cursor() as cur:

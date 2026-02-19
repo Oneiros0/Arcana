@@ -49,7 +49,7 @@ class CoinbaseSource(DataSource):
             headers={"Content-Type": "application/json"},
             timeout=30.0,
         )
-        # Allow swarm to scale the delay so N workers share the 10 req/s budget
+        # Configurable via ARCANA_RATE_DELAY env var (default ~8 req/s)
         self._rate_delay = float(os.environ.get("ARCANA_RATE_DELAY", RATE_LIMIT_DELAY))
 
     @property

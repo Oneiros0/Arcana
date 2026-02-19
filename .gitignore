@@ -25,3 +25,5 @@ venv/
 # Old project
 node_modules/
 staticList.json
+
+.claude/
