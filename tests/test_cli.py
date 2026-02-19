@@ -101,6 +101,28 @@ class TestCLI:
         assert result.exit_code != 0
         assert "Invalid bar spec" in result.output
 
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.CoinbaseSource")
+    @patch("arcana.cli.run_daemon")
+    def test_run_fails_when_no_data(self, mock_daemon, mock_source_cls, mock_db_cls):
+        mock_daemon.side_effect = RuntimeError(
+            "No trades found for ETH-USD. Run 'arcana ingest ETH-USD --since <date>' first."
+        )
+
+        mock_source = MagicMock()
+        mock_source_cls.return_value.__enter__ = MagicMock(return_value=mock_source)
+        mock_source_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_db = MagicMock()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "ETH-USD"])
+
+        assert result.exit_code != 0
+        assert "No trades found" in result.output
+
 
 class TestParseBarSpec:
     def test_tick_spec(self):
