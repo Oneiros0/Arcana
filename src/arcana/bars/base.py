@@ -17,7 +17,8 @@ from arcana.ingestion.models import Trade
 class Bar(BaseModel):
     """A single completed bar with OHLCV and auxiliary data.
 
-    Matches the `bars` table schema in the database.
+    The bar_type field is used in-memory for routing to the correct
+    per-type table (e.g. bars_tick_500) but is not stored as a column.
     """
 
     time_start: datetime = Field(description="Timestamp of the first trade in the bar")
@@ -90,8 +91,19 @@ class Accumulator:
         self._price_x_volume += trade.price * trade.size
         self.tick_count += 1
 
-    def to_bar(self, bar_type: str, source: str, pair: str) -> Bar:
-        """Produce a completed Bar from the accumulated state."""
+    def to_bar(
+        self,
+        bar_type: str,
+        source: str,
+        pair: str,
+        metadata: dict | None = None,
+    ) -> Bar:
+        """Produce a completed Bar from the accumulated state.
+
+        Args:
+            metadata: Optional bar-specific extra info (e.g. EWMA state
+                for information-driven bars).  Stored in the JSONB column.
+        """
         assert self.tick_count > 0, "Cannot create bar from empty accumulator"
         assert self.time_start is not None and self.time_end is not None
         assert self._open is not None and self._close is not None
@@ -118,6 +130,7 @@ class Accumulator:
             dollar_volume=self._dollar_volume,
             tick_count=self.tick_count,
             time_span=self.time_end - self.time_start,
+            metadata=metadata,
         )
 
 
@@ -166,15 +179,40 @@ class BarBuilder(ABC):
         """Emit the current in-progress bar (at end of data or shutdown).
 
         Returns None if no trades have been accumulated.
+        Includes flush metadata from subclass hook (e.g. EWMA state).
         """
         if self._acc.tick_count > 0:
-            bar = self._acc.to_bar(self.bar_type, self._source, self._pair)
+            metadata = self._flush_metadata()
+            bar = self._acc.to_bar(
+                self.bar_type, self._source, self._pair, metadata=metadata,
+            )
             self._acc = Accumulator()
             return bar
         return None
 
-    def _emit_and_reset(self) -> Bar:
+    def _emit_and_reset(self, metadata: dict | None = None) -> Bar:
         """Emit the current bar and start a fresh accumulator."""
-        bar = self._acc.to_bar(self.bar_type, self._source, self._pair)
+        bar = self._acc.to_bar(
+            self.bar_type, self._source, self._pair, metadata=metadata,
+        )
         self._acc = Accumulator()
         return bar
+
+    def _flush_metadata(self) -> dict | None:
+        """Hook for subclasses to attach metadata on flush.
+
+        Information-driven builders override this to persist EWMA state
+        so that daemon restarts can resume without a cold start.
+
+        Returns None by default (standard builders have no metadata).
+        """
+        return None
+
+    def restore_state(self, metadata: dict) -> None:
+        """Restore builder state from bar metadata (e.g. on daemon restart).
+
+        Information-driven builders override this to restore their EWMA
+        estimator from the last emitted bar's metadata.
+
+        No-op in the base class and standard builders.
+        """

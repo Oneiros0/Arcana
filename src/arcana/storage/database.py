@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
     from arcana.bars.base import Bar
 
 logger = logging.getLogger(__name__)
+
+# ── Raw trades schema ─────────────────────────────────────────────────────────
 
 RAW_TRADES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS raw_trades (
@@ -32,11 +35,52 @@ CREATE INDEX IF NOT EXISTS idx_raw_trades_pair_ts
     ON raw_trades (pair, timestamp);
 """
 
-BARS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS bars (
+HYPERTABLE_RAW = """
+SELECT create_hypertable('raw_trades', 'timestamp', if_not_exists => TRUE);
+"""
+
+UPSERT_TRADES = """
+INSERT INTO raw_trades (timestamp, trade_id, source, pair, price, size, side)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (source, trade_id, timestamp) DO NOTHING;
+"""
+
+# ── Per-pair-per-type bar table helpers ───────────────────────────────────────
+#
+# Each (bar_type, pair) combination gets its own table with its own
+# hypertable and indexes.  E.g. tick_500 bars for ETH-USD live in
+# bars_tick_500_eth_usd.  Tables are created lazily on first insert so
+# any user-defined threshold + pair is supported without migrations.
+
+_BAR_TYPE_PATTERN = re.compile(r"^[a-z0-9_.]+$")
+_PAIR_PATTERN = re.compile(r"^[A-Za-z0-9]+-[A-Za-z0-9]+$")
+
+
+def _bar_table_name(bar_type: str, pair: str) -> str:
+    """Convert a (bar_type, pair) to a safe PostgreSQL table name.
+
+    Examples:
+        ('tick_500', 'ETH-USD')    -> 'bars_tick_500_eth_usd'
+        ('volume_10.5', 'BTC-USD') -> 'bars_volume_10_5_btc_usd'
+
+    Raises:
+        ValueError: If bar_type or pair contain invalid characters.
+    """
+    if not _BAR_TYPE_PATTERN.match(bar_type):
+        raise ValueError(f"Invalid bar_type for table name: {bar_type!r}")
+    if not _PAIR_PATTERN.match(pair):
+        raise ValueError(f"Invalid pair for table name: {pair!r}")
+
+    pair_norm = pair.lower().replace("-", "_")
+    return f"bars_{bar_type.replace('.', '_')}_{pair_norm}"
+
+
+def _bar_table_schema(table_name: str) -> str:
+    """Generate CREATE TABLE + index DDL for a per-type bar table."""
+    return f"""
+CREATE TABLE IF NOT EXISTS {table_name} (
     time_start    TIMESTAMPTZ   NOT NULL,
     time_end      TIMESTAMPTZ   NOT NULL,
-    bar_type      TEXT          NOT NULL,
     source        TEXT          NOT NULL,
     pair          TEXT          NOT NULL,
     open          NUMERIC       NOT NULL,
@@ -48,45 +92,32 @@ CREATE TABLE IF NOT EXISTS bars (
     dollar_volume NUMERIC       NOT NULL,
     tick_count    INTEGER       NOT NULL,
     time_span     INTERVAL      NOT NULL,
-    metadata      JSONB,
-    UNIQUE (bar_type, source, pair, time_start)
+    metadata      JSONB
 );
+
+CREATE INDEX IF NOT EXISTS idx_{table_name}_pair_ts
+    ON {table_name} (source, pair, time_start);
 """
 
-HYPERTABLE_RAW = """
-SELECT create_hypertable('raw_trades', 'timestamp', if_not_exists => TRUE);
-"""
 
-HYPERTABLE_BARS = """
-SELECT create_hypertable('bars', 'time_start', if_not_exists => TRUE);
-"""
+def _bar_table_hypertable(table_name: str) -> str:
+    """Generate TimescaleDB hypertable DDL for a bar table."""
+    return f"SELECT create_hypertable('{table_name}', 'time_start', if_not_exists => TRUE);"
 
-UPSERT_TRADES = """
-INSERT INTO raw_trades (timestamp, trade_id, source, pair, price, size, side)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (source, trade_id, timestamp) DO NOTHING;
-"""
 
-UPSERT_BARS = """
-INSERT INTO bars (
-    time_start, time_end, bar_type, source, pair,
+def _bar_insert_sql(table_name: str) -> str:
+    """Generate INSERT SQL for a per-type bar table (14 columns, no bar_type)."""
+    return f"""
+INSERT INTO {table_name} (
+    time_start, time_end, source, pair,
     open, high, low, close, vwap,
     volume, dollar_volume, tick_count, time_span, metadata
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (bar_type, source, pair, time_start) DO UPDATE SET
-    time_end = EXCLUDED.time_end,
-    open = EXCLUDED.open,
-    high = EXCLUDED.high,
-    low = EXCLUDED.low,
-    close = EXCLUDED.close,
-    vwap = EXCLUDED.vwap,
-    volume = EXCLUDED.volume,
-    dollar_volume = EXCLUDED.dollar_volume,
-    tick_count = EXCLUDED.tick_count,
-    time_span = EXCLUDED.time_span,
-    metadata = EXCLUDED.metadata;
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
 """
+
+
+# ── Database class ────────────────────────────────────────────────────────────
 
 
 class Database:
@@ -95,6 +126,7 @@ class Database:
     def __init__(self, config: DatabaseConfig) -> None:
         self._config = config
         self._conn: psycopg.Connection | None = None
+        self._initialized_bar_tables: set[str] = set()
 
     def connect(self) -> psycopg.Connection:
         """Open a connection to TimescaleDB."""
@@ -104,17 +136,16 @@ class Database:
         return self._conn
 
     def init_schema(self) -> None:
-        """Create tables and convert them to hypertables.
+        """Create the raw_trades table and convert it to a hypertable.
 
+        Bar tables are created lazily on first insert via _ensure_bar_table().
         Safe to call multiple times — uses IF NOT EXISTS.
         """
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(RAW_TRADES_SCHEMA)
-            cur.execute(BARS_SCHEMA)
             try:
                 cur.execute(HYPERTABLE_RAW)
-                cur.execute(HYPERTABLE_BARS)
                 logger.info("Hypertables created/verified")
             except psycopg.errors.UndefinedFunction:
                 logger.warning(
@@ -125,9 +156,79 @@ class Database:
                 # Re-create tables since rollback undid them
                 with conn.cursor() as cur2:
                     cur2.execute(RAW_TRADES_SCHEMA)
-                    cur2.execute(BARS_SCHEMA)
         conn.commit()
         logger.info("Database schema initialized")
+
+    # ── Bar table management ──────────────────────────────────────────────
+
+    def _ensure_bar_table(self, bar_type: str, pair: str) -> str:
+        """Ensure the per-pair-per-type bar table exists, creating lazily.
+
+        Returns the table name.
+        """
+        table_name = _bar_table_name(bar_type, pair)
+        if table_name in self._initialized_bar_tables:
+            return table_name
+
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(_bar_table_schema(table_name))
+            try:
+                cur.execute(_bar_table_hypertable(table_name))
+            except psycopg.errors.UndefinedFunction:
+                logger.warning(
+                    "create_hypertable not available for %s — "
+                    "TimescaleDB extension may not be installed.",
+                    table_name,
+                )
+                conn.rollback()
+                with conn.cursor() as cur2:
+                    cur2.execute(_bar_table_schema(table_name))
+        conn.commit()
+        self._initialized_bar_tables.add(table_name)
+        logger.debug("Bar table %s initialized", table_name)
+        return table_name
+
+    def _table_exists(self, table_name: str) -> bool:
+        """Check whether a table exists in the public schema."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT EXISTS ("
+                "  SELECT 1 FROM pg_tables "
+                "  WHERE schemaname = 'public' AND tablename = %s"
+                ")",
+                (table_name,),
+            )
+            row = cur.fetchone()
+            return bool(row and row[0])
+
+    def _list_bar_tables(self) -> list[str]:
+        """Discover all per-type bar tables in the database."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' AND tablename LIKE 'bars_%' "
+                "ORDER BY tablename"
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def _count_bars_in_table(self, table_name: str, pair: str | None) -> int:
+        """Count rows in a bar table, optionally filtered by pair."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            if pair:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM {table_name} WHERE pair = %s",
+                    (pair,),
+                )
+            else:
+                cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    # ── Trade operations ──────────────────────────────────────────────────
 
     def insert_trades(self, trades: list[Trade]) -> int:
         """Batch upsert trades into raw_trades.
@@ -193,47 +294,64 @@ class Database:
             row = cur.fetchone()
             return row[0] if row and row[0] else None
 
-    def insert_bars(self, bars: list[Bar]) -> int:
-        """Batch upsert bars into the bars table.
+    # ── Bar operations ────────────────────────────────────────────────────
 
-        Uses ON CONFLICT DO UPDATE so re-building bars over the same
-        time range replaces stale data.
+    def insert_bars(self, bars: list[Bar]) -> int:
+        """Batch insert bars into per-pair-per-type bar tables.
+
+        Each bar is routed to its table based on (bar_type, pair).
+        E.g. bars with bar_type='tick_500' and pair='ETH-USD' go into
+        the bars_tick_500_eth_usd table.  Tables are created lazily.
+
+        Callers must delete stale bars first (via delete_bars_since) to
+        avoid duplicates — this is a plain INSERT with no conflict handling.
 
         Returns:
-            Number of rows upserted.
+            Number of rows inserted.
         """
         import json
+        from itertools import groupby
 
         if not bars:
             return 0
 
         conn = self.connect()
-        with conn.cursor() as cur:
-            cur.executemany(
-                UPSERT_BARS,
-                [
-                    (
-                        b.time_start,
-                        b.time_end,
-                        b.bar_type,
-                        b.source,
-                        b.pair,
-                        b.open,
-                        b.high,
-                        b.low,
-                        b.close,
-                        b.vwap,
-                        b.volume,
-                        b.dollar_volume,
-                        b.tick_count,
-                        b.time_span,
-                        json.dumps(b.metadata) if b.metadata else None,
-                    )
-                    for b in bars
-                ],
-            )
+
+        # Group bars by (bar_type, pair) for per-table insertion
+        def _routing_key(b: Bar) -> tuple[str, str]:
+            return (b.bar_type, b.pair)
+
+        sorted_bars = sorted(bars, key=_routing_key)
+        for (bar_type, pair), group in groupby(sorted_bars, key=_routing_key):
+            table_name = self._ensure_bar_table(bar_type, pair)
+            insert_sql = _bar_insert_sql(table_name)
+            group_list = list(group)
+
+            with conn.cursor() as cur:
+                cur.executemany(
+                    insert_sql,
+                    [
+                        (
+                            b.time_start,
+                            b.time_end,
+                            b.source,
+                            b.pair,
+                            b.open,
+                            b.high,
+                            b.low,
+                            b.close,
+                            b.vwap,
+                            b.volume,
+                            b.dollar_volume,
+                            b.tick_count,
+                            b.time_span,
+                            json.dumps(b.metadata) if b.metadata else None,
+                        )
+                        for b in group_list
+                    ],
+                )
         conn.commit()
-        logger.debug("Upserted %d bars", len(bars))
+        logger.debug("Inserted %d bars", len(bars))
         return len(bars)
 
     def get_last_bar_time(
@@ -243,38 +361,101 @@ class Database:
 
         Used by bar builders to know where to resume construction.
         """
+        table_name = _bar_table_name(bar_type, pair)
+        if not self._table_exists(table_name):
+            return None
+
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT MAX(time_end) FROM bars "
-                "WHERE bar_type = %s AND pair = %s AND source = %s",
-                (bar_type, pair, source),
+                f"SELECT MAX(time_end) FROM {table_name} "
+                "WHERE pair = %s AND source = %s",
+                (pair, source),
             )
             row = cur.fetchone()
             return row[0] if row and row[0] else None
 
+    def delete_bars_since(
+        self,
+        bar_type: str,
+        pair: str,
+        since: datetime,
+        source: str = "coinbase",
+    ) -> int:
+        """Delete bars at or after *since* for a given bar type/pair.
+
+        Used before rebuilding bars from a resume point to prevent
+        duplicates (since bars use plain INSERT, not upsert).
+
+        Returns:
+            Number of rows deleted.
+        """
+        table_name = _bar_table_name(bar_type, pair)
+        if not self._table_exists(table_name):
+            return 0
+
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {table_name} "
+                "WHERE pair = %s AND source = %s AND time_start >= %s",
+                (pair, source, since),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        logger.debug(
+            "Deleted %d %s bars for %s from %s onward",
+            deleted, bar_type, pair, since.isoformat(),
+        )
+        return deleted
+
     def get_bar_count(
         self, bar_type: str | None = None, pair: str | None = None
     ) -> int:
-        """Get bar count, optionally filtered by type and/or pair."""
+        """Get bar count, optionally filtered by type and/or pair.
+
+        When both bar_type and pair are given, queries the specific
+        per-pair-per-type table.
+        When bar_type is None, discovers all bars_* tables and sums counts.
+        """
+        if bar_type and pair:
+            table_name = _bar_table_name(bar_type, pair)
+            if not self._table_exists(table_name):
+                return 0
+            return self._count_bars_in_table(table_name, pair)
+        else:
+            tables = self._list_bar_tables()
+            return sum(self._count_bars_in_table(t, pair) for t in tables)
+
+    def get_last_bar_metadata(
+        self, bar_type: str, pair: str, source: str = "coinbase"
+    ) -> dict | None:
+        """Get the metadata of the most recent bar for a given type/pair.
+
+        Used by the pipeline to restore EWMA state on daemon restart.
+        Returns None if the table doesn't exist or has no bars.
+        """
+        import json
+
+        table_name = _bar_table_name(bar_type, pair)
+        if not self._table_exists(table_name):
+            return None
+
         conn = self.connect()
-        conditions: list[str] = []
-        params: list[str] = []
-        if bar_type:
-            conditions.append("bar_type = %s")
-            params.append(bar_type)
-        if pair:
-            conditions.append("pair = %s")
-            params.append(pair)
-
-        query = "SELECT COUNT(*) FROM bars"
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-
         with conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(
+                f"SELECT metadata FROM {table_name} "
+                "WHERE pair = %s AND source = %s "
+                "ORDER BY time_end DESC LIMIT 1",
+                (pair, source),
+            )
             row = cur.fetchone()
-            return row[0] if row else 0
+            if row and row[0]:
+                # psycopg returns JSONB as dict directly
+                return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            return None
+
+    # ── Trade queries ─────────────────────────────────────────────────────
 
     def get_trades_since(
         self,
@@ -282,20 +463,39 @@ class Database:
         since: datetime,
         source: str = "coinbase",
         limit: int = 100_000,
+        since_trade_id: str | None = None,
     ) -> list[Trade]:
-        """Fetch raw trades from the database after a given timestamp.
+        """Fetch raw trades from the database after a given cursor position.
 
-        Used by bar builders to load trades for construction.
+        Uses a composite cursor (timestamp, trade_id) for deterministic
+        pagination.  When multiple trades share the same timestamp, trade_id
+        breaks the tie so no trades are skipped between batches.
+
+        Args:
+            since_trade_id: If provided, skips trades at ``since`` whose
+                trade_id is <= this value.  Pass the trade_id of the last
+                trade in the previous batch to guarantee gapless iteration.
         """
         conn = self.connect()
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT timestamp, trade_id, source, pair, price, size, side "
-                "FROM raw_trades "
-                "WHERE pair = %s AND source = %s AND timestamp > %s "
-                "ORDER BY timestamp ASC LIMIT %s",
-                (pair, source, since, limit),
-            )
+            if since_trade_id is not None:
+                # Composite cursor: everything strictly after (timestamp, trade_id)
+                cur.execute(
+                    "SELECT timestamp, trade_id, source, pair, price, size, side "
+                    "FROM raw_trades "
+                    "WHERE pair = %s AND source = %s "
+                    "  AND (timestamp, trade_id) > (%s, %s) "
+                    "ORDER BY timestamp ASC, trade_id ASC LIMIT %s",
+                    (pair, source, since, since_trade_id, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT timestamp, trade_id, source, pair, price, size, side "
+                    "FROM raw_trades "
+                    "WHERE pair = %s AND source = %s AND timestamp > %s "
+                    "ORDER BY timestamp ASC, trade_id ASC LIMIT %s",
+                    (pair, source, since, limit),
+                )
             rows = cur.fetchall()
 
         return [

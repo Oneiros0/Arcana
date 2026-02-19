@@ -201,14 +201,21 @@ class TestBuildBars:
 
         db = MagicMock()
         db.get_last_bar_time.return_value = last_bar_time
+        db.get_last_bar_metadata.return_value = None
+        db.delete_bars_since.return_value = 0
         db.get_trades_since.return_value = []
 
         builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
         build_bars(builder, db, "ETH-USD")
 
+        # Should delete stale bars from resume point before rebuilding
+        db.delete_bars_since.assert_called_once_with(
+            "tick_5", "ETH-USD", last_bar_time, "coinbase",
+        )
         # Should query trades starting from last bar time, not first trade
         db.get_trades_since.assert_called_once_with(
-            "ETH-USD", last_bar_time, "coinbase", limit=100_000
+            "ETH-USD", last_bar_time, "coinbase", limit=100_000,
+            since_trade_id=None,
         )
         db.get_first_timestamp.assert_not_called()
 
@@ -270,6 +277,30 @@ class TestBuildBars:
         # The flush should produce 1 bar
         assert total == 1
         assert db.insert_bars.called
+
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_restores_ewma_state(self, mock_shutdown):
+        """When resuming, should restore EWMA state from last bar metadata."""
+        mock_shutdown.return_value.should_stop = False
+
+        from arcana.bars.imbalance import TickImbalanceBarBuilder
+
+        last_bar_time = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+        saved_metadata = {"ewma_window": 10, "ewma_expected": 42.5}
+
+        db = MagicMock()
+        db.get_last_bar_time.return_value = last_bar_time
+        db.get_last_bar_metadata.return_value = saved_metadata
+        db.delete_bars_since.return_value = 0
+        db.get_trades_since.return_value = []
+
+        builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
+        build_bars(builder, db, "ETH-USD")
+
+        # EWMA should have been restored from metadata
+        assert builder._ewma.expected == pytest.approx(42.5)
+        assert builder._ewma.window == 10
 
 
 class TestRunDaemon:

@@ -8,19 +8,20 @@ The goal: provide researchers and quant developers with properly structured bars
 
 ---
 
-## Current Status (2026-02-11)
+## Current Status (2026-02-19)
 
 | Component | Status | Details |
 |---|---|---|
 | **Ingestion pipeline** | Done | Backfill + daemon mode, backward sequential pagination, graceful shutdown |
 | **Coinbase API client** | Done | Advanced Trade API, retry with backoff, rate limiting |
-| **Database layer** | Done | raw_trades + bars tables, upsert, trade/bar CRUD |
+| **Database layer** | Done | raw_trades + per-pair-per-type bar tables, upsert, trade/bar CRUD, metadata retrieval |
 | **Standard bar builders** | Done | Time, tick, volume, dollar — all with OHLCV + VWAP |
-| **Bar CLI command** | Not started | `arcana bars build` needs wiring |
-| **Bar builder recovery** | Not started | DB methods exist, orchestration not connected |
-| **Information-driven bars** | Not started | TIB, VIB, DIB, TRB, VRB, DRB (Phase 2) |
+| **Bar CLI command** | Done | `arcana bars build {spec} {pair}` — all 10 bar types |
+| **Bar builder recovery** | Done | EWMA state persistence via bar metadata + `restore_state()` |
+| **Information-driven bars** | Done | TIB, VIB, DIB (imbalance) + TRB, VRB, DRB (run) — all with EWMA adaptive thresholds |
+| **Per-pair table naming** | Done | Each (bar_type, pair) gets its own hypertable: `bars_tick_500_eth_usd` |
 
-**Codebase:** 2,024 lines source / 1,268 lines test / 87 tests passing
+**Codebase:** ~3,000 lines source / ~2,000 lines test / 157 tests passing
 
 ---
 
@@ -197,9 +198,9 @@ Every bar, regardless of type, includes:
 │                                             │
 │  TimescaleDB (PostgreSQL)                   │
 │  ┌──────────────┐  ┌─────────────────────┐  │
-│  │ raw_trades   │  │ bars                │  │
-│  │ (hypertable) │  │ (hypertable per     │  │
-│  │              │  │  bar type)          │  │
+│  │ raw_trades   │  │ bars_*_*            │  │
+│  │ (hypertable) │  │ (per-pair-per-type  │  │
+│  │              │  │  hypertables)       │  │
 │  └──────────────┘  └─────────────────────┘  │
 └─────────────────────────────────────────────┘
 ```
@@ -232,10 +233,12 @@ All data sources implement a `DataSource` abstract base class with:
 
 **Storage Layer** — Manages TimescaleDB connections, schema migrations, and read/write:
 - Raw trades stored in a `raw_trades` hypertable (partitioned by time)
-- Bars stored in `bars` table with upsert on `(bar_type, source, pair, time_start)`
+- Bars stored in per-pair-per-type tables (e.g., `bars_tick_500_eth_usd`) with upsert on `(bar_type, source, pair, time_start)`
+- Tables created lazily on first bar build — each (bar_type, pair) gets its own hypertable
 - Handles deduplication (trade IDs), upserts, and compression policies
 - `get_trades_since()` loads raw trades for bar construction
 - `get_last_bar_time()` provides resume points for incremental bar building
+- `get_last_bar_metadata()` retrieves EWMA state for info-driven bar restart recovery
 
 ---
 
@@ -261,11 +264,11 @@ arcana/
 │       │
 │       ├── bars/
 │       │   ├── __init__.py           # Exports all bar types
-│       │   ├── base.py              # Bar model, Accumulator, BarBuilder ABC (180 lines)
-│       │   ├── standard.py          # TickBar, VolumeBar, DollarBar, TimeBar (130 lines)
-│       │   ├── imbalance.py *       # TickImbalanceBar, VolumeImbalanceBar, DollarImbalanceBar
-│       │   ├── runs.py *            # TickRunBar, VolumeRunBar, DollarRunBar
-│       │   └── utils.py *           # EWMA estimator, tick rule
+│       │   ├── base.py              # Bar model, Accumulator, BarBuilder ABC
+│       │   ├── standard.py          # TickBar, VolumeBar, DollarBar, TimeBar
+│       │   ├── imbalance.py         # TickImbalanceBar, VolumeImbalanceBar, DollarImbalanceBar
+│       │   ├── runs.py              # TickRunBar, VolumeRunBar, DollarRunBar
+│       │   └── utils.py             # EWMA estimator, tick rule
 │       │
 │       └── storage/
 │           ├── __init__.py
@@ -345,12 +348,16 @@ CREATE TABLE raw_trades (
 SELECT create_hypertable('raw_trades', 'timestamp');
 ```
 
-### `bars` (TimescaleDB hypertable)
+### Per-pair-per-type bar tables (TimescaleDB hypertables)
+
+Each `(bar_type, pair)` combination gets its own table, created lazily on first build. Example table name: `bars_tick_500_eth_usd`.
+
 ```sql
-CREATE TABLE bars (
+-- Template for each per-pair-per-type bar table:
+CREATE TABLE bars_{bar_type}_{pair_norm} (
     time_start    TIMESTAMPTZ   NOT NULL,
     time_end      TIMESTAMPTZ   NOT NULL,
-    bar_type      TEXT          NOT NULL,   -- 'time_1m', 'tick_500', 'tib_ewma5', etc.
+    bar_type      TEXT          NOT NULL,   -- 'tick_500', 'tib_10', etc.
     source        TEXT          NOT NULL,
     pair          TEXT          NOT NULL,
     open          NUMERIC       NOT NULL,
@@ -362,12 +369,14 @@ CREATE TABLE bars (
     dollar_volume NUMERIC       NOT NULL,
     tick_count    INTEGER       NOT NULL,
     time_span     INTERVAL      NOT NULL,
-    metadata      JSONB,                   -- bar-specific extra info (thresholds, EWMA state)
+    metadata      JSONB,                   -- EWMA state for info-driven bars
     UNIQUE (bar_type, source, pair, time_start)
 );
 
-SELECT create_hypertable('bars', 'time_start');
+SELECT create_hypertable('bars_{bar_type}_{pair_norm}', 'time_start');
 ```
+
+This per-table approach eliminates cross-pair scans — a strategy reading BTC-USD tick bars never touches ETH-USD data.
 
 ---
 
@@ -445,7 +454,7 @@ arcana swarm stop --remove-volumes                # tear down + delete data
 - [x] Duplicate detection — `UNIQUE (source, trade_id, timestamp)` constraint + `ON CONFLICT DO NOTHING` upserts so re-running ingestion over an overlapping range is safe
 - [x] API failure retry — exponential backoff (2s, 4s, 8s, 16s) on HTTP errors, with max 4 retries before halting
 - [x] Daemon heartbeat — logs last successful poll time; on restart, detects gap and backfills missed trades before resuming the poll loop
-- [ ] Bar builder recovery — wire `get_last_bar_time()` + `get_trades_since()` into a bar rebuild routine at startup. The DB methods exist, but the orchestration is not yet connected.
+- [x] Bar builder recovery — `build_bars()` resumes from last bar, EWMA state restored via `get_last_bar_metadata()` + `restore_state()`
 - [x] Graceful shutdown — handles SIGINT/SIGTERM, finishes current batch and commits before exiting
 
 **Standard Bar Builders:**
@@ -460,26 +469,27 @@ arcana swarm stop --remove-volumes                # tear down + delete data
 
 **CLI & Tests:**
 - [x] CLI: `arcana db init`, `arcana ingest`, `arcana run`, `arcana status`
-- [ ] CLI: `arcana bars build` — wire bar builders to CLI command
+- [x] CLI: `arcana bars build {spec} {pair}` — all 10 bar types wired to CLI
 - [x] Unit tests for bar construction (22 tests with hand-computed expected values)
 - [x] Tests for pipeline (backfill, resume, checkpointing, graceful shutdown)
 - [x] Tests for ingestion (fetch, backward pagination, dedup, retry — 16 tests)
-- [ ] README with quickstart
+- [x] README with quickstart
 
-### Phase 2 — Information-Driven Bars
+### Phase 2 — Information-Driven Bars ✅
 **Goal:** Implement Prado's information-driven sampling methods.
 
-- [ ] Tick rule implementation (trade sign classification)
-- [ ] EWMA estimator (configurable windows: 3, 5, 15, 30, 60)
-- [ ] Tick imbalance bars (TIB)
-- [ ] Volume imbalance bars (VIB)
-- [ ] Dollar imbalance bars (DIB)
-- [ ] Tick run bars (TRB)
-- [ ] Volume run bars (VRB)
-- [ ] Dollar run bars (DRB)
-- [ ] EWMA state persistence for daemon restarts (imbalance/run bars carry state across cycles)
-- [ ] CLI: `arcana bars build` for all imbalance/run types
-- [ ] Tests with synthetic trade sequences to verify bar boundaries
+- [x] Tick rule implementation (trade sign classification) — `bars/utils.py`
+- [x] EWMA estimator (configurable windows) — `bars/utils.py`
+- [x] Tick imbalance bars (TIB) — `bars/imbalance.py`
+- [x] Volume imbalance bars (VIB) — `bars/imbalance.py`
+- [x] Dollar imbalance bars (DIB) — `bars/imbalance.py`
+- [x] Tick run bars (TRB) — `bars/runs.py`
+- [x] Volume run bars (VRB) — `bars/runs.py`
+- [x] Dollar run bars (DRB) — `bars/runs.py`
+- [x] EWMA state persistence for daemon restarts (metadata JSONB + `restore_state()`)
+- [x] CLI: `arcana bars build` for all imbalance/run types (`tib_N`, `vib_N`, `dib_N`, `trb_N`, `vrb_N`, `drb_N`)
+- [x] Tests with synthetic trade sequences to verify bar boundaries (28 new tests)
+- [x] Per-pair-per-type bar tables (`bars_tick_500_eth_usd` naming)
 
 ### Phase 3 — Pipeline & Polish
 **Goal:** End-to-end automated pipeline, export, documentation.

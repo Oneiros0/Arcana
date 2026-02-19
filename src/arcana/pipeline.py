@@ -263,10 +263,26 @@ def build_bars(
     last_bar_time = db.get_last_bar_time(builder.bar_type, pair, source)
     if last_bar_time:
         since = last_bar_time
+
+        # Restore EWMA state BEFORE deleting stale bars — the last bar's
+        # metadata carries the EWMA estimator state needed for warm restart.
+        last_metadata = db.get_last_bar_metadata(builder.bar_type, pair, source)
+        if last_metadata:
+            builder.restore_state(last_metadata)
+            logger.info(
+                "Restored builder state from last bar metadata (EWMA=%.4f)",
+                last_metadata.get("ewma_expected", 0.0),
+            )
+
+        # Delete bars from the resume point onward — the last bar batch
+        # may have been incomplete, and plain INSERT (no upsert) requires
+        # a clean slate to avoid duplicates.
+        deleted = db.delete_bars_since(builder.bar_type, pair, since, source)
         logger.info(
-            "Resuming %s bar construction from %s",
+            "Resuming %s bar construction from %s (cleared %d stale bars)",
             builder.bar_type,
             since.isoformat(),
+            deleted,
         )
     else:
         first_ts = db.get_first_timestamp(pair, source)
@@ -283,10 +299,13 @@ def build_bars(
 
     total_bars = 0
     total_trades = 0
+    since_trade_id: str | None = None  # composite cursor
     start_time = time_mod.time()
 
     while not shutdown.should_stop:
-        trades = db.get_trades_since(pair, since, source, limit=TRADE_BATCH)
+        trades = db.get_trades_since(
+            pair, since, source, limit=TRADE_BATCH, since_trade_id=since_trade_id,
+        )
         if not trades:
             break
 
@@ -297,6 +316,7 @@ def build_bars(
 
         total_trades += len(trades)
         since = trades[-1].timestamp
+        since_trade_id = trades[-1].trade_id
 
         elapsed = time_mod.time() - start_time
         rate = total_trades / elapsed if elapsed > 0 else 0
