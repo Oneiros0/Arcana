@@ -5,10 +5,10 @@ All share the same OHLCV+auxiliary output; they differ only in what
 triggers a new bar.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from arcana.bars.base import Accumulator, Bar, BarBuilder
+from arcana.bars.base import Bar, BarBuilder
 from arcana.ingestion.models import Trade
 
 
@@ -111,7 +111,7 @@ class TimeBarBuilder(BarBuilder):
         epoch = ts.timestamp()
         bucket_start_epoch = (epoch // self._interval_seconds) * self._interval_seconds
         bucket_end_epoch = bucket_start_epoch + self._interval_seconds
-        return datetime.fromtimestamp(bucket_end_epoch, tz=timezone.utc)
+        return datetime.fromtimestamp(bucket_end_epoch, tz=UTC)
 
     def process_trade(self, trade: Trade) -> Bar | None:
         bucket_end = self._bucket_end(trade.timestamp)

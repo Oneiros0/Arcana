@@ -9,7 +9,7 @@ import logging
 import os
 import signal
 import time as time_mod
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from arcana.bars.base import BarBuilder
 from arcana.ingestion.base import DataSource
@@ -64,7 +64,7 @@ def ingest_backfill(
     """
     shutdown = GracefulShutdown()
 
-    end = until or datetime.now(timezone.utc)
+    end = until or datetime.now(UTC)
 
     # Resume from last stored trade within the backfill range.
     last_ts = db.get_last_timestamp(pair, source.name, before=end)
@@ -191,7 +191,7 @@ def run_daemon(
     )
 
     # Catch-up phase: fill gap from last stored trade to now
-    gap = datetime.now(timezone.utc) - last_ts
+    gap = datetime.now(UTC) - last_ts
     if gap.total_seconds() > interval:
         logger.info("Catching up: %s gap detected", _format_eta(gap.total_seconds()))
         ingest_backfill(source, db, pair, since=last_ts)
@@ -201,7 +201,7 @@ def run_daemon(
     cycle = 0
     while not shutdown.should_stop:
         cycle += 1
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         try:
             trades = source.fetch_all_trades(pair=pair, start=last_ts, end=now)

@@ -1,11 +1,11 @@
 """Tests for Bar model, Accumulator, and BarBuilder base class."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
-from arcana.bars.base import Accumulator, Bar, BarBuilder
+from arcana.bars.base import Accumulator, Bar
 from arcana.ingestion.models import Trade
 
 
@@ -16,7 +16,7 @@ def _trade(
     side: str = "buy",
 ) -> Trade:
     """Create a trade at a fixed base time + offset seconds."""
-    base = datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 2, 10, 12, 0, 0, tzinfo=UTC)
     return Trade(
         timestamp=base + timedelta(seconds=ts_offset),
         trade_id=f"t-{ts_offset}",
@@ -92,8 +92,8 @@ class TestAccumulator:
 class TestBarModel:
     def test_bar_fields(self):
         bar = Bar(
-            time_start=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
-            time_end=datetime(2026, 1, 1, 0, 5, 0, tzinfo=timezone.utc),
+            time_start=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            time_end=datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC),
             bar_type="time_5m",
             source="coinbase",
             pair="ETH-USD",

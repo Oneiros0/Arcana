@@ -244,8 +244,6 @@ All data sources implement a `DataSource` abstract base class with:
 
 ## Project Structure
 
-Files marked with `*` are planned but not yet created.
-
 ```
 arcana/
 ├── src/
@@ -254,8 +252,7 @@ arcana/
 │       ├── cli.py                    # Click CLI entry point (493 lines)
 │       ├── config.py                 # DatabaseConfig, ArcanaConfig (27 lines)
 │       ├── pipeline.py              # ingest_backfill, run_daemon, GracefulShutdown (244 lines)
-│       ├── swarm.py                 # Parallel backfill: split_range, compose gen, validation (272 lines)
-│       │
+│
 │       ├── ingestion/
 │       │   ├── __init__.py
 │       │   ├── base.py              # DataSource ABC (fetch_trades, fetch_all_trades)
@@ -284,15 +281,18 @@ arcana/
 │   │   └── sample_advanced_trade_response.json
 │   ├── test_cli.py                  # 7 tests
 │   ├── test_pipeline.py             # 7 tests
-│   ├── test_swarm.py                # 24 tests (split_range, compose gen, CLI)
 │   ├── test_ingestion/
 │   │   ├── test_coinbase.py         # 16 tests (fetch, pagination, retry)
 │   │   └── test_models.py           # 6 tests
+│   ├── test_storage/
+│   │   └── test_database.py         # Bar table naming, pair validation
 │   └── test_bars/
-│       ├── test_base.py             # 6 tests (Accumulator, Bar model)
-│       └── test_standard.py         # 21 tests (all 4 bar types)
+│       ├── test_base.py             # Accumulator, Bar model
+│       ├── test_standard.py         # Tick, Volume, Dollar, Time bar tests
+│       ├── test_imbalance.py        # TIB, VIB, DIB tests
+│       ├── test_runs.py             # TRB, VRB, DRB tests
+│       └── test_utils.py            # EWMA, tick rule tests
 │
-├── Dockerfile                       # Python 3.11-slim, pip install, ENTRYPOINT arcana
 ├── pyproject.toml                   # Project metadata, dependencies, build config
 ├── README.md
 ├── PLAN.md                          # This document
@@ -312,7 +312,6 @@ arcana/
 | `httpx` | HTTP client for Coinbase REST API |
 | `click` | CLI framework |
 | `pydantic` | Configuration validation, data models |
-| `pyyaml` | Docker Compose YAML generation (swarm module) |
 
 ### Optional (`pip install arcana[analysis]`)
 | Package | Purpose |
@@ -390,36 +389,27 @@ arcana db init
 arcana ingest ETH-USD --since 2025-01-01          # backfill from date
 arcana ingest ETH-USD --since 2025-01-01 --until 2025-06-01  # bounded backfill
 
-# Construct bars from stored trades
-arcana bars build --type tick --threshold 500     # tick bars, 500 trades each
-arcana bars build --type volume --threshold 100   # volume bars, 100 ETH each
-arcana bars build --type dollar --threshold 500000  # dollar bars, $500k each
-arcana bars build --type time --interval 5m       # 5-minute time bars
-arcana bars build --type tib --ewma-window 15     # tick imbalance bars
-arcana bars build --type vib --ewma-window 30     # volume imbalance bars
-arcana bars build --type dib --ewma-window 5      # dollar imbalance bars
-arcana bars build --type trb --ewma-window 15     # tick run bars
-arcana bars build --type vrb --ewma-window 60     # volume run bars
-arcana bars build --type drb --ewma-window 3      # dollar run bars
+# Construct bars from stored trades (standard)
+arcana bars build tick_500 ETH-USD                # tick bars, 500 trades each
+arcana bars build volume_100 ETH-USD              # volume bars, 100 ETH each
+arcana bars build dollar_50000 ETH-USD            # dollar bars, $50k each
+arcana bars build time_5m ETH-USD                 # 5-minute time bars
 
-# Export bars for analysis
-arcana bars export --type tib --format parquet --output ./data/
-arcana bars export --type tib --format csv --output ./data/
+# Construct bars from stored trades (information-driven)
+arcana bars build tib_20 ETH-USD                  # tick imbalance bars (EWMA window=20)
+arcana bars build vib_10 ETH-USD                  # volume imbalance bars
+arcana bars build dib_10 ETH-USD                  # dollar imbalance bars
+arcana bars build trb_10 ETH-USD                  # tick run bars
+arcana bars build vrb_10 ETH-USD                  # volume run bars
+arcana bars build drb_10 ETH-USD                  # dollar run bars
 
-# Run the batch pipeline (ingest + build all configured bars)
-arcana pipeline run                               # single run
-arcana pipeline schedule --interval 15m           # recurring 15-min batch
+# Run the daemon (ingest + build bars on interval)
+arcana run ETH-USD                                # poll every 15 minutes
+arcana run ETH-USD --interval 300                 # custom interval (5 min)
 
 # Status and diagnostics
-arcana status                                     # trade count, bar counts, last update
-
-# Parallel backfill via Docker
-arcana swarm launch ETH-USD --since 2022-01-01 --workers 24   # generate compose file
-arcana swarm launch ETH-USD --since 2022-01-01 --workers 24 --up  # generate + start
-arcana swarm status ETH-USD --password arcana     # per-month trade counts
-arcana swarm validate ETH-USD --since 2022-01-01 --password arcana  # gap detection
-arcana swarm stop                                 # tear down containers
-arcana swarm stop --remove-volumes                # tear down + delete data
+arcana status                                     # all pairs
+arcana status ETH-USD                             # specific pair
 ```
 
 ---
@@ -593,225 +583,6 @@ Every 15 minutes:
   end   = now
   Fetch trades → store → build bars
 ```
-
-### Parallel Backfill via Docker Swarm
-
-**The problem:** Single-process backfill is bottlenecked by the Coinbase rate limit (10 req/s per IP). A 4-year backfill of ETH-USD takes ~15 days serially. The data is time-partitioned and writes are idempotent (upsert), so parallel ingestion across non-overlapping time ranges is safe by construction.
-
-**The approach:** Run N Docker containers, each responsible for a distinct chunk of historical data. Each container runs the existing `arcana ingest` command with `--since` and `--until`. On a single host, all containers share one public IP, so the 10 req/s Coinbase rate limit is shared. The `ARCANA_RATE_DELAY` env var scales each worker's delay to `N * 0.12s` so the aggregate stays under the limit. On multiple hosts (true Docker Swarm or separate machines), each host gets its own IP and rate budget — that's where the linear speedup comes from.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                  Docker Compose / Swarm                    │
-│                                                          │
-│  ┌─────────────┐  ┌─────────────┐       ┌─────────────┐  │
-│  │ worker-1    │  │ worker-2    │  ...  │ worker-N    │  │
-│  │ 2022-01     │  │ 2022-02     │       │ 2026-01     │  │
-│  │ arcana      │  │ arcana      │       │ arcana      │  │
-│  │  ingest     │  │  ingest     │       │  ingest     │  │
-│  │  --since    │  │  --since    │       │  --since    │  │
-│  │  --until    │  │  --until    │       │  --until    │  │
-│  └──────┬──────┘  └──────┬──────┘       └──────┬──────┘  │
-│         │                │                      │         │
-│         └────────────────┼──────────────────────┘         │
-│                          ▼                                │
-│              ┌─────────────────────┐                      │
-│              │    TimescaleDB      │                      │
-│              │    (shared)         │                      │
-│              │                     │                      │
-│              │  raw_trades table   │                      │
-│              │  UNIQUE(source,     │                      │
-│              │   trade_id,        │                      │
-│              │   timestamp)       │                      │
-│              │  ON CONFLICT        │                      │
-│              │    DO NOTHING       │                      │
-│              └─────────────────────┘                      │
-└──────────────────────────────────────────────────────────┘
-```
-
-**Why this is safe:**
-
-1. **No write conflicts.** Each worker ingests a disjoint time range. Even if ranges overlap slightly at boundaries, the `UNIQUE(source, trade_id, timestamp)` constraint with `ON CONFLICT DO NOTHING` makes duplicate writes harmless.
-2. **No read coordination.** Workers don't need to know about each other. Each one runs the standard `ingest_backfill()` flow with its own `since`/`until` range.
-3. **Resumable per worker.** If a container crashes, restart it — it resumes from `MAX(timestamp)` within its assigned range, same as single-process mode.
-4. **Database handles concurrency.** PostgreSQL/TimescaleDB is designed for concurrent writers. The hypertable partitions by timestamp, so workers writing to different time ranges hit different chunks with minimal lock contention.
-
-**Bounded ingestion:** The `--until` flag on `arcana ingest` caps the end time so workers exit when their range is complete:
-```bash
-# Worker for January 2023
-arcana ingest ETH-USD --since 2023-01-01 --until 2023-02-01
-
-# Worker for February 2023
-arcana ingest ETH-USD --since 2023-02-01 --until 2023-03-01
-```
-
-**Rate limiting and speedup:**
-
-On a **single host**, all workers share one public IP. The aggregate rate is always ~8 req/s regardless of worker count. More workers don't make API calls faster — they split the work into smaller ranges so each finishes sooner, and the swarm can resume from partial progress per-worker.
-
-| Setup | Workers | Aggregate rate | 4-year ETH-USD |
-|---|---|---|---|
-| Single host | 1 | ~8 req/s | ~15 days |
-| Single host | 4 | ~8 req/s | ~15 days (but 4 smaller ranges) |
-| 4 separate hosts | 4 (1 per host) | ~32 req/s | ~3.7 days |
-| 12 separate hosts | 12 (1 per host) | ~96 req/s | ~1.3 days |
-| 24 separate hosts | 24 (1 per host) | ~192 req/s | ~16 hours |
-
-True parallel speedup requires **multiple public IPs** — either separate machines, cloud VMs, or proxy rotation. On a single machine, the swarm's value is work partitioning and per-worker resumability, not API throughput.
-
-When using separate IPs (VPN, proxy rotation, or separate machines), pass `--multi-ip` to skip rate-delay scaling — each worker keeps the default 0.12s delay (~8 req/s per worker):
-```bash
-arcana swarm launch ETH-USD --since 2022-01-01 --workers 12 --multi-ip
-```
-
-**Docker Compose sketch:**
-```yaml
-services:
-  db:
-    image: timescale/timescaledb:latest-pg16
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_DB: arcana
-      POSTGRES_USER: arcana
-      POSTGRES_PASSWORD: arcana
-    volumes:
-      - arcana_data:/var/lib/postgresql/data
-
-  worker-2022-01:
-    image: arcana:latest
-    command: arcana ingest ETH-USD --since 2022-01-01 --until 2022-02-01
-    depends_on: [db]
-    environment:
-      ARCANA_DB_HOST: db
-
-  worker-2022-02:
-    image: arcana:latest
-    command: arcana ingest ETH-USD --since 2022-02-01 --until 2022-03-01
-    depends_on: [db]
-    environment:
-      ARCANA_DB_HOST: db
-
-  # ... one service per month, or generate with a script
-
-volumes:
-  arcana_data:
-```
-
-In practice, `arcana swarm launch` generates the full compose file for any date range, automatically splitting into equal-duration worker chunks. The Dockerfile is straightforward — `pip install .` into a Python 3.11 image.
-
-### How to Run the Swarm
-
-**Prerequisites:**
-- Docker Desktop (or Docker Engine + Docker Compose plugin) installed and running
-- The Arcana repository cloned locally
-- No other service using port 5432 (the swarm spins up its own TimescaleDB)
-
-**Step 1 — Build the Docker image:**
-```bash
-docker build -t arcana:latest .
-```
-This packages the Arcana source code into a container image. Re-run this step after any code changes.
-
-**Step 2 — Generate the compose file and review the plan:**
-```bash
-arcana swarm launch ETH-USD --since 2022-01-01 --until 2024-01-01 --workers 24
-```
-This prints a worker assignment table (which worker covers which date range) and writes `docker-compose.swarm.yml`. It does **not** start containers yet — review the plan first.
-
-Key options:
-| Flag | Default | Description |
-|---|---|---|
-| `--workers` | 12 | Number of parallel containers |
-| `--until` | now | End of backfill range |
-| `--output` | `docker-compose.swarm.yml` | Output file path |
-| `--image` | `arcana:latest` | Docker image for workers |
-| `--password` | `arcana` | Database password |
-| `--multi-ip` | off | Workers have separate IPs (VPN/proxy); skip rate-delay scaling |
-| `--up` | off | Auto-start containers after generating |
-
-**Step 3 — Start the swarm:**
-```bash
-docker compose -f docker-compose.swarm.yml up -d
-```
-Or combine steps 2 and 3 with `--up`:
-```bash
-arcana swarm launch ETH-USD --since 2022-01-01 --until 2024-01-01 --workers 24 --up
-```
-
-**Step 4 — Monitor progress:**
-```bash
-# Per-month trade counts from the swarm's database
-arcana swarm status ETH-USD --password arcana
-
-# Watch container health and restarts
-docker compose -f docker-compose.swarm.yml ps
-
-# Stream worker logs (all workers)
-docker compose -f docker-compose.swarm.yml logs -f
-
-# Stream logs for a single worker
-docker compose -f docker-compose.swarm.yml logs -f worker-00-20220101-20220131
-```
-
-**Step 5 — Validate coverage after completion:**
-```bash
-arcana swarm validate ETH-USD --since 2022-01-01 --until 2024-01-01 --password arcana
-```
-This scans the database for gaps (days with missing trades) and reports them. A clean run shows "No gaps detected. Coverage is complete."
-
-**Step 6 — Stop the swarm:**
-```bash
-# Stop containers, keep the data volume
-arcana swarm stop
-
-# Stop containers AND delete the data volume
-arcana swarm stop --remove-volumes
-```
-
-**Troubleshooting:**
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `pull access denied for arcana` | Image not built locally | Run `docker build -t arcana:latest .` |
-| `swarm status` shows 0 trades | Password mismatch (default for `swarm status` vs compose DB) | Pass `--password arcana` to status/validate commands |
-| Worker stuck in restart loop | API rate limit or DB connection failure | Check logs: `docker compose -f docker-compose.swarm.yml logs worker-XX-...` |
-| Port 5432 already in use | Local PostgreSQL is running | Stop it (`brew services stop postgresql` / `sudo systemctl stop postgresql`) or use `--port 5433` |
-| Workers exit immediately | `--since` after `--until` or invalid pair | Check compose file command args |
-
-**Storage estimate for 4-year backfill:**
-
-| | Value |
-|---|---|
-| Estimated total trades | ~525 million |
-| Raw storage (uncompressed) | ~80 GB |
-| With TimescaleDB compression | ~15–20 GB |
-| Indexes | ~30 GB uncompressed |
-| **Total disk needed** | **~120 GB uncompressed, ~40 GB compressed** |
-
-TimescaleDB compression should be enabled on the `raw_trades` hypertable for chunks older than 7 days:
-```sql
-ALTER TABLE raw_trades SET (
-  timescaledb.compress,
-  timescaledb.compress_segmentby = 'source, pair',
-  timescaledb.compress_orderby = 'timestamp'
-);
-SELECT add_compression_policy('raw_trades', INTERVAL '7 days');
-```
-
-**Implementation checklist:**
-- [x] Add `--until` flag to `arcana ingest` CLI and `ingest_backfill()`
-- [x] Add `ARCANA_DB_HOST` / `ARCANA_DB_*` environment variable support to CLI
-- [x] Create `Dockerfile`
-- [x] `arcana swarm launch` — generates docker-compose.yml with N workers for any date range
-- [x] `arcana swarm status` — per-month trade count from the swarm DB
-- [x] `arcana swarm validate` — gap detection across the ingested range
-- [x] `arcana swarm stop` — tears down containers (optionally removes volumes)
-- [x] Worker restart policy (on-failure, max 5 attempts, 30s delay)
-- [x] DB healthcheck — workers wait for TimescaleDB to be ready before starting
-- [x] 24 tests covering split_range, compose generation, CLI commands
-- [ ] Add TimescaleDB compression policy to `init_schema()`
-- [ ] Document the parallel backfill workflow in README
 
 ---
 

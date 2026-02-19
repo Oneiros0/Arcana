@@ -1,24 +1,23 @@
 """Tests for the ingestion pipeline."""
 
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from arcana.bars.standard import TickBarBuilder
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.ingestion.models import Trade
-from arcana.pipeline import BATCH_SIZE, _format_eta, build_bars, ingest_backfill, run_daemon
+from arcana.pipeline import _format_eta, build_bars, ingest_backfill, run_daemon
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 def _make_trades(count: int, start_ts: datetime | None = None) -> list[Trade]:
     """Generate a list of fake trades for testing."""
-    base = start_ts or datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
+    base = start_ts or datetime(2026, 2, 10, 12, 0, 0, tzinfo=UTC)
     trades = []
     for i in range(count):
         trades.append(
@@ -52,7 +51,7 @@ class TestIngestBackfill:
         db.get_last_timestamp.return_value = None
         db.insert_trades.return_value = 10
 
-        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
+        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=UTC)
         # Use a window large enough to cover since→now in a single window
         total = ingest_backfill(
             source, db, "ETH-USD", since, window=timedelta(days=7),
@@ -73,12 +72,12 @@ class TestIngestBackfill:
         source.fetch_all_trades.return_value = []
         source._client = True
 
-        last = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+        last = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
         db = MagicMock()
         db.get_last_timestamp.return_value = last
         db.insert_trades.return_value = 0
 
-        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
+        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=UTC)
         ingest_backfill(source, db, "ETH-USD", since)
 
         # The first fetch_trades call should start from last, not since
@@ -97,17 +96,17 @@ class TestIngestBackfill:
         source.fetch_all_trades.return_value = _make_trades(5)
         source._client = True
 
-        until = datetime(2026, 2, 4, 0, 0, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 2, 4, 0, 0, 0, tzinfo=UTC)
 
         db = MagicMock()
         # Simulate: global max is Feb 12 (from another worker), but
         # within this worker's range the max is Feb 3
         db.get_last_timestamp.return_value = datetime(
-            2026, 2, 3, 12, 0, 0, tzinfo=timezone.utc
+            2026, 2, 3, 12, 0, 0, tzinfo=UTC
         )
         db.insert_trades.return_value = 5
 
-        since = datetime(2026, 2, 3, 0, 0, 0, tzinfo=timezone.utc)
+        since = datetime(2026, 2, 3, 0, 0, 0, tzinfo=UTC)
         ingest_backfill(source, db, "ETH-USD", since, until=until)
 
         # Verify get_last_timestamp was called with before=until
@@ -131,7 +130,7 @@ class TestIngestBackfill:
         db.get_last_timestamp.return_value = None
         db.insert_trades.return_value = 600
 
-        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
+        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=UTC)
         ingest_backfill(source, db, "ETH-USD", since, window=timedelta(minutes=30))
 
         # insert_trades should be called (at least once for final flush)
@@ -165,8 +164,8 @@ class TestIngestBackfill:
         db.get_last_timestamp.return_value = None
         db.insert_trades.return_value = 5
 
-        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=timezone.utc)
-        total = ingest_backfill(source, db, "ETH-USD", since)
+        since = datetime(2026, 2, 10, 12, 0, 0, tzinfo=UTC)
+        ingest_backfill(source, db, "ETH-USD", since)
 
         # Should have committed the buffer before stopping
         assert db.insert_trades.called
@@ -197,7 +196,7 @@ class TestBuildBars:
         """If bars exist, should resume from last bar's time_end."""
         mock_shutdown.return_value.should_stop = False
 
-        last_bar_time = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+        last_bar_time = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
 
         db = MagicMock()
         db.get_last_bar_time.return_value = last_bar_time
@@ -242,7 +241,7 @@ class TestBuildBars:
         # First batch exactly at TRADE_BATCH (10) triggers pagination
         batch1 = _make_trades(10)
         batch2 = _make_trades(
-            5, start_ts=datetime(2026, 2, 10, 12, 0, 10, tzinfo=timezone.utc)
+            5, start_ts=datetime(2026, 2, 10, 12, 0, 10, tzinfo=UTC)
         )
 
         db = MagicMock()
@@ -286,7 +285,7 @@ class TestBuildBars:
 
         from arcana.bars.imbalance import TickImbalanceBarBuilder
 
-        last_bar_time = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+        last_bar_time = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
         saved_metadata = {"ewma_window": 10, "ewma_expected": 42.5}
 
         db = MagicMock()

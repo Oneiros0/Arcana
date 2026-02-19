@@ -4,12 +4,9 @@ Each test uses hand-crafted trade sequences with known expected outputs
 to verify correctness — per Prado's emphasis on exact bar math.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
-
-from arcana.bars.base import Bar
 from arcana.bars.standard import (
     DollarBarBuilder,
     TickBarBuilder,
@@ -18,7 +15,7 @@ from arcana.bars.standard import (
 )
 from arcana.ingestion.models import Trade
 
-BASE_TIME = datetime(2026, 2, 10, 14, 0, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
 
 
 def _trade(

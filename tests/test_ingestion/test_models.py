@@ -1,6 +1,6 @@
 """Tests for trade data models."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from arcana.ingestion.models import Trade
@@ -8,7 +8,7 @@ from arcana.ingestion.models import Trade
 
 def _make_trade(**overrides) -> Trade:
     defaults = {
-        "timestamp": datetime(2026, 2, 10, 14, 30, 0, tzinfo=timezone.utc),
+        "timestamp": datetime(2026, 2, 10, 14, 30, 0, tzinfo=UTC),
         "trade_id": "12345",
         "source": "coinbase",
         "pair": "ETH-USD",
@@ -47,7 +47,7 @@ class TestTrade:
             pass  # Expected — model is frozen
 
     def test_fields_stored_correctly(self):
-        ts = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
         t = _make_trade(
             timestamp=ts,
             trade_id="abc-123",

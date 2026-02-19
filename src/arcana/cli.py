@@ -1,11 +1,14 @@
 """Arcana CLI — command-line interface for the trading data pipeline."""
 
+from __future__ import annotations
+
 import logging
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import click
 
@@ -13,6 +16,9 @@ from arcana.config import DatabaseConfig
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.pipeline import DAEMON_INTERVAL, build_bars, ingest_backfill, run_daemon
 from arcana.storage.database import Database
+
+if TYPE_CHECKING:
+    from arcana.bars.base import BarBuilder
 
 
 def _db_config_from_options(
@@ -116,8 +122,8 @@ def ingest(
 
     Example: arcana ingest ETH-USD --since 2025-01-01
     """
-    since_utc = since.replace(tzinfo=timezone.utc)
-    until_utc = until.replace(tzinfo=timezone.utc) if until else None
+    since_utc = since.replace(tzinfo=UTC)
+    until_utc = until.replace(tzinfo=UTC) if until else None
     config = _db_config_from_options(host, port, database, user, password)
 
     end_label = until_utc.date() if until_utc else "now"
@@ -210,7 +216,7 @@ def status(
             click.echo(f"  Total trades: {total:,}")
             if last_ts:
                 click.echo(f"  Last trade:   {last_ts.isoformat()}")
-                gap = datetime.now(timezone.utc) - last_ts
+                gap = datetime.now(UTC) - last_ts
                 click.echo(f"  Data gap:     {gap}")
             else:
                 click.echo("  No trades stored yet.")
@@ -229,7 +235,7 @@ _BAR_SPEC_PATTERN = re.compile(
 )
 
 
-def _parse_bar_spec(spec: str, source: str, pair: str) -> "BarBuilder":
+def _parse_bar_spec(spec: str, source: str, pair: str) -> BarBuilder:
     """Parse a bar spec string like 'tick_500' or 'tib_20' into a BarBuilder."""
     from arcana.bars.imbalance import (
         DollarImbalanceBarBuilder,

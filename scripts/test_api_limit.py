@@ -8,20 +8,20 @@ and reports how many trades each returns.
 """
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from arcana.ingestion.coinbase import CoinbaseSource
 
 # A busy trading hour — Feb 5 2025, 14:00-15:00 UTC
-START = datetime(2025, 2, 5, 14, 0, 0, tzinfo=timezone.utc)
-END = datetime(2025, 2, 5, 15, 0, 0, tzinfo=timezone.utc)
+START = datetime(2025, 2, 5, 14, 0, 0, tzinfo=UTC)
+END = datetime(2025, 2, 5, 15, 0, 0, tzinfo=UTC)
 LIMITS = [5000, 2500, 1000, 300]
 
 
 def main() -> None:
     source = CoinbaseSource()
 
-    print(f"Testing Coinbase API limit parameter")
+    print("Testing Coinbase API limit parameter")
     print(f"Window: {START.isoformat()} → {END.isoformat()}")
     print(f"{'limit':>8s} │ {'returned':>8s} │ notes")
     print(f"{'─' * 8} │ {'─' * 8} │ {'─' * 40}")
@@ -34,9 +34,9 @@ def main() -> None:
             if count == limit:
                 note = "← at limit (may be capped)"
             elif count < limit:
-                note = f"← under limit (all trades in window)"
+                note = "← under limit (all trades in window)"
             else:
-                note = f"← exceeded limit??"
+                note = "← exceeded limit??"
             print(f"{limit:>8d} │ {count:>8d} │ {note}")
             results.append((limit, count))
         except Exception as e:
@@ -52,7 +52,7 @@ def main() -> None:
         print(f"All limits returned {counts[0]} trades — API caps at {counts[0]}.")
     elif counts and max(counts) > 300:
         best = max(counts)
-        best_limit = [l for l, c in results if c == best][0]
+        best_limit = [lim for lim, c in results if c == best][0]
         print(f"Higher limits work! Best: limit={best_limit} → {best} trades.")
         print(f"This is {best / 300:.1f}x more trades per request than limit=300.")
     else:

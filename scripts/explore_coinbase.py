@@ -10,7 +10,7 @@ With --live, hits the real Coinbase Advanced Trade API (no auth needed).
 import json
 import statistics
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -62,23 +62,23 @@ def show_raw_api_shape() -> None:
     raw_path = FIXTURES_DIR / "sample_advanced_trade_response.json"
     data = json.loads(raw_path.read_text())
 
-    print(f"  Response type: dict")
+    print("  Response type: dict")
     print(f"  Top-level keys: {list(data.keys())}")
     print(f"  Trades count: {len(data['trades'])}")
     print(f"  best_bid: {data['best_bid']}, best_ask: {data['best_ask']}")
-    print(f"\n  First trade:")
+    print("\n  First trade:")
     print(json.dumps(data["trades"][0], indent=4))
     print(f"\n  Trade fields: {list(data['trades'][0].keys())}")
-    print(f"  Field types:")
+    print("  Field types:")
     for k, v in data["trades"][0].items():
         print(f"    {k}: {type(v).__name__} = {v!r}")
 
-    print(f"\n  Key notes:")
-    print(f"    - side is TAKER side ('BUY'/'SELL') — use directly, no inversion")
-    print(f"    - trade_id is UUID string")
-    print(f"    - All prices/sizes are strings — parse with Decimal")
-    print(f"    - start/end params are UNIX timestamps for time-window queries")
-    print(f"    - Forward pagination: walk start/end windows through time")
+    print("\n  Key notes:")
+    print("    - side is TAKER side ('BUY'/'SELL') — use directly, no inversion")
+    print("    - trade_id is UUID string")
+    print("    - All prices/sizes are strings — parse with Decimal")
+    print("    - start/end params are UNIX timestamps for time-window queries")
+    print("    - Forward pagination: walk start/end windows through time")
 
 
 def analyze_trades(trades: list[Trade], source_label: str) -> None:
@@ -94,7 +94,7 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
     span = (trades[-1].timestamp - trades[0].timestamp).total_seconds()
     print(f"Time span: {span:.1f} seconds ({span / 60:.1f} minutes)")
 
-    print(f"\nFirst 5 trades:")
+    print("\nFirst 5 trades:")
     for t in trades[:5]:
         print(
             f"  {t.timestamp.isoformat()} | {t.side:4s} | "
@@ -154,7 +154,7 @@ def analyze_trades(trades: list[Trade], source_label: str) -> None:
 
     tick_imbalance = sum(t.sign() for t in trades)
     print(f"\nTick imbalance (sum of signs): {tick_imbalance:+d}")
-    print(f"  (positive = net buying pressure, negative = net selling pressure)")
+    print("  (positive = net buying pressure, negative = net selling pressure)")
 
     section("8. INTER-TRADE TIME ANALYSIS")
 

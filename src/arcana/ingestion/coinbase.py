@@ -13,7 +13,7 @@ Key advantages over the Exchange API:
 import logging
 import os
 import time as time_mod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
@@ -185,7 +185,7 @@ class CoinbaseSource(DataSource):
             if earliest_unix <= start_unix:
                 break  # Reached the start boundary
 
-            current_end = datetime.fromtimestamp(earliest_unix, tz=timezone.utc)
+            current_end = datetime.fromtimestamp(earliest_unix, tz=UTC)
             time_mod.sleep(self._rate_delay)
 
         if pages > 1:
