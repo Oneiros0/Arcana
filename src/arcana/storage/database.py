@@ -410,6 +410,37 @@ class Database:
         )
         return deleted
 
+    def delete_all_bars(
+        self,
+        bar_type: str,
+        pair: str,
+        source: str = "coinbase",
+    ) -> int:
+        """Delete ALL bars for a given bar type/pair (full rebuild).
+
+        Returns:
+            Number of rows deleted.
+        """
+        table_name = _bar_table_name(bar_type, pair)
+        if not self._table_exists(table_name):
+            return 0
+
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {table_name} WHERE pair = %s AND source = %s",
+                (pair, source),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        logger.info(
+            "Deleted all %d %s bars for %s (full rebuild)",
+            deleted,
+            bar_type,
+            pair,
+        )
+        return deleted
+
     def get_bar_count(self, bar_type: str | None = None, pair: str | None = None) -> int:
         """Get bar count, optionally filtered by type and/or pair.
 
@@ -554,7 +585,55 @@ class Database:
             )
             row = cur.fetchone()
             if row and row[0] is not None and row[1] is not None and row[1] > 0:
-                return (row[0], row[1])
+                return (float(row[0]), float(row[1]))
+            return None
+
+    def get_trade_volume_stats(
+        self, pair: str, source: str = "coinbase"
+    ) -> tuple[float, float, float] | None:
+        """Get total trade count, total volume, and time span in days.
+
+        Returns:
+            (total_trades, total_volume, days) or None if no trades exist.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*)::float, SUM(size)::float, "
+                "EXTRACT(epoch FROM MAX(timestamp) - MIN(timestamp)) / 86400.0 "
+                "FROM raw_trades WHERE pair = %s AND source = %s",
+                (pair, source),
+            )
+            row = cur.fetchone()
+            if row and row[0] and row[0] > 0 and row[2] and row[2] > 0:
+                return (float(row[0]), float(row[1]), float(row[2]))
+            return None
+
+    def get_imbalance_stats(
+        self, pair: str, source: str = "coinbase", sample_limit: int = 100_000
+    ) -> tuple[float, float, float] | None:
+        """Compute trade-level statistics from a recent sample for E₀ calibration.
+
+        Returns:
+            (avg_size, avg_dollar_volume, buy_fraction) or None if insufficient data.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT "
+                "  AVG(size)::float, "
+                "  AVG(price * size)::float, "
+                "  SUM(CASE WHEN side = 'buy' THEN 1 ELSE 0 END)::float / COUNT(*)::float "
+                "FROM ("
+                "  SELECT price, size, side FROM raw_trades "
+                "  WHERE pair = %s AND source = %s "
+                "  ORDER BY timestamp DESC LIMIT %s"
+                ") sub",
+                (pair, source, sample_limit),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return (float(row[0]), float(row[1]), float(row[2]))
             return None
 
     def close(self) -> None:

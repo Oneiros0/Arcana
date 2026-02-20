@@ -31,9 +31,15 @@ class _ImbalanceBarBuilder(BarBuilder):
     easier to emit during directional flow.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
         super().__init__(source, pair)
-        self._ewma = EWMAEstimator(window=ewma_window)
+        self._ewma = EWMAEstimator(window=ewma_window, initial_value=initial_expected)
         self._cum_imbalance: float = 0.0
         self._prev_price: Decimal | None = None
         self._prev_sign: int = 1  # default to +1 until first tick rule fires
@@ -95,8 +101,14 @@ class TickImbalanceBarBuilder(_ImbalanceBarBuilder):
     Pure count-based — insensitive to trade size or price.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
-        super().__init__(source, pair, ewma_window)
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
+        super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
 
     @property
@@ -114,8 +126,14 @@ class VolumeImbalanceBarBuilder(_ImbalanceBarBuilder):
     Sensitive to trade size but not price level.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
-        super().__init__(source, pair, ewma_window)
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
+        super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
 
     @property
@@ -134,8 +152,14 @@ class DollarImbalanceBarBuilder(_ImbalanceBarBuilder):
     for both trade size and price level.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
-        super().__init__(source, pair, ewma_window)
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
+        super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
 
     @property

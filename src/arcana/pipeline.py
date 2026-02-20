@@ -282,6 +282,177 @@ def calibrate_dollar_threshold(
     return threshold
 
 
+def calibrate_tick_threshold(
+    db: Database,
+    pair: str,
+    bars_per_day: int = 50,
+    source: str = "coinbase",
+) -> int:
+    """Auto-calibrate tick bar threshold from trade data.
+
+    threshold = total_trades / (days × bars_per_day)
+
+    Returns:
+        Tick count threshold (integer, minimum 1).
+
+    Raises:
+        ValueError: If no trade data exists for the pair.
+    """
+    stats = db.get_trade_volume_stats(pair, source)
+    if stats is None:
+        raise ValueError(f"No trade data for {pair}. Run 'arcana ingest' first.")
+
+    total_trades, _, days = stats
+    raw = total_trades / (days * bars_per_day)
+    threshold = max(1, round(raw))
+
+    logger.info(
+        "Calibrated tick threshold for %s: %d ticks "
+        "(%.1f days, %d total trades, target %d bars/day → ~%d total bars)",
+        pair,
+        threshold,
+        days,
+        int(total_trades),
+        bars_per_day,
+        int(total_trades / threshold),
+    )
+    return threshold
+
+
+def calibrate_volume_threshold(
+    db: Database,
+    pair: str,
+    bars_per_day: int = 50,
+    source: str = "coinbase",
+) -> float:
+    """Auto-calibrate volume bar threshold from trade data.
+
+    threshold = total_volume / (days × bars_per_day)
+
+    Returns:
+        Volume threshold rounded to a clean value.
+
+    Raises:
+        ValueError: If no trade data exists for the pair.
+    """
+    stats = db.get_trade_volume_stats(pair, source)
+    if stats is None:
+        raise ValueError(f"No trade data for {pair}. Run 'arcana ingest' first.")
+
+    _, total_volume, days = stats
+    raw = total_volume / (days * bars_per_day)
+
+    # Round to a clean value
+    import math
+
+    if raw >= 1.0:
+        magnitude = 10 ** int(math.log10(raw))
+        threshold = round(raw / magnitude) * magnitude
+    else:
+        threshold = round(raw, 4)
+    threshold = max(threshold, 0.0001)
+
+    logger.info(
+        "Calibrated volume threshold for %s: %.4f "
+        "(%.1f days, %.0f total volume, target %d bars/day → ~%d total bars)",
+        pair,
+        threshold,
+        days,
+        total_volume,
+        bars_per_day,
+        int(total_volume / threshold),
+    )
+    return threshold
+
+
+def calibrate_info_bar_initial_expected(
+    db: Database,
+    pair: str,
+    bar_kind: str,
+    bars_per_day: int = 50,
+    source: str = "coinbase",
+) -> float:
+    """Calibrate E₀ for information-driven bars (Prado Ch. 2).
+
+    Imbalance bars (tib/vib/dib):
+      E₀ = E[T] × max(|2P[buy]-1|, 0.1) × E[|contribution|]
+      Where E[T] = expected ticks per bar, the cumulative imbalance
+      grows proportional to trades × direction bias.
+
+    Run bars (trb/vrb/drb):
+      E₀ = E[run_length] × E[|contribution|]
+      Where E[run_length] = p_same / (1 - p_same) is the expected
+      geometric run length before a direction change, and
+      p_same = max(P[buy], 1-P[buy]) is the probability of the
+      dominant direction continuing.
+
+    Args:
+        bar_kind: One of 'tib', 'vib', 'dib', 'trb', 'vrb', 'drb'.
+
+    Returns:
+        Initial expected value for the EWMA estimator.
+
+    Raises:
+        ValueError: If insufficient trade data or unknown bar_kind.
+    """
+    # E[T]: expected ticks per bar
+    trade_stats = db.get_trade_volume_stats(pair, source)
+    if trade_stats is None:
+        raise ValueError(f"No trade data for {pair}. Run 'arcana ingest' first.")
+    total_trades, _, days = trade_stats
+    expected_ticks_per_bar = total_trades / (days * bars_per_day)
+
+    # Imbalance statistics from recent trades
+    imbalance_stats = db.get_imbalance_stats(pair, source)
+    if imbalance_stats is None:
+        raise ValueError(f"Insufficient trade data for {pair} imbalance stats.")
+    avg_size, avg_dollar, buy_fraction = imbalance_stats
+
+    # Contribution per trade by bar variant
+    imbalance_kinds = {"tib", "vib", "dib"}
+    run_kinds = {"trb", "vrb", "drb"}
+    tick_kinds = {"tib", "trb"}
+    volume_kinds = {"vib", "vrb"}
+
+    if bar_kind not in (imbalance_kinds | run_kinds):
+        raise ValueError(f"Unknown bar kind: {bar_kind}")
+
+    if bar_kind in tick_kinds:
+        avg_contribution = 1.0
+    elif bar_kind in volume_kinds:
+        avg_contribution = avg_size
+    else:  # dollar kinds
+        avg_contribution = avg_dollar
+
+    if bar_kind in imbalance_kinds:
+        # Imbalance: cumulative signed sum grows ~ E[T] × |2P-1|
+        direction_bias = max(abs(2 * buy_fraction - 1), 0.1)
+        e0 = expected_ticks_per_bar * direction_bias * avg_contribution
+        logger.info(
+            "Calibrated E₀ for %s on %s: %.2f "
+            "(E[T]=%.0f ticks, P[buy]=%.3f, bias=%.3f, E[|c|]=%.4f)",
+            bar_kind, pair, e0,
+            expected_ticks_per_bar, buy_fraction, direction_bias, avg_contribution,
+        )
+    else:
+        # Run bars: expected geometric run length before direction change.
+        # p_same = probability the next trade continues the dominant direction.
+        # E[run] = p_same / (1 - p_same) for a geometric distribution.
+        # Floor p_same at 0.55 and cap at 0.95 for numerical stability.
+        p_same = max(buy_fraction, 1 - buy_fraction)
+        p_same = min(max(p_same, 0.55), 0.95)
+        expected_run_length = p_same / (1 - p_same)
+        e0 = expected_run_length * avg_contribution
+        logger.info(
+            "Calibrated E₀ for %s on %s: %.2f "
+            "(P[same]=%.3f, E[run]=%.1f trades, E[|c|]=%.4f)",
+            bar_kind, pair, e0,
+            p_same, expected_run_length, avg_contribution,
+        )
+
+    return e0
+
+
 TRADE_BATCH = 100_000  # Trades per DB fetch for bar construction
 
 
@@ -290,6 +461,7 @@ def build_bars(
     db: Database,
     pair: str,
     source: str = "coinbase",
+    rebuild: bool = False,
 ) -> int:
     """Build bars from stored trades using the given builder.
 
@@ -302,11 +474,23 @@ def build_bars(
         db: Database with stored trades.
         pair: Trading pair, e.g. 'ETH-USD'.
         source: Data source name.
+        rebuild: If True, delete all existing bars and rebuild from scratch.
 
     Returns:
         Total number of bars emitted and stored.
     """
     shutdown = GracefulShutdown()
+
+    # Full rebuild: wipe existing bars, start fresh
+    if rebuild:
+        deleted = db.delete_all_bars(builder.bar_type, pair, source)
+        if deleted:
+            logger.info(
+                "Rebuild: deleted %d existing %s bars for %s",
+                deleted,
+                builder.bar_type,
+                pair,
+            )
 
     # Resume from last emitted bar, or start from first trade
     last_bar_time = db.get_last_bar_time(builder.bar_type, pair, source)

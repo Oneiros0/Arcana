@@ -290,29 +290,41 @@ def main() -> int:
         )
         log("")
 
-    # ── 3. Build all 11 bar types ─────────────────────────────────────
-    log_section("3. BAR CONSTRUCTION (11 types)")
+    # ── 3. Build bar types from config ───────────────────────────────
+    # Load bar specs from arcana.toml (auto-calibrated thresholds)
+    try:
+        from arcana.config import ArcanaConfig
 
-    bar_specs = [
-        "tick_500",
-        "volume_100",
-        "dollar_50000",
-        "time_5m",
-        "time_1h",
-        "tib_10",
-        "vib_10",
-        "dib_10",
-        "trb_10",
-        "vrb_10",
-        "drb_10",
-    ]
+        cfg = ArcanaConfig.find_and_load()
+    except Exception:
+        cfg = None
+
+    if cfg and cfg.bars:
+        bar_specs = [b.spec for b in cfg.bars if b.enabled]
+    else:
+        # Fallback: auto-calibrated defaults
+        bar_specs = [
+            "tick_auto",
+            "volume_auto",
+            "dollar_auto",
+            "time_5m",
+            "time_1h",
+            "tib_10",
+            "vib_10",
+            "dib_10",
+            "trb_10",
+            "vrb_10",
+            "drb_10",
+        ]
+
+    log_section(f"3. BAR CONSTRUCTION ({len(bar_specs)} types)")
 
     for spec in bar_specs:
         log(f"  Building {spec}...")
         t0 = time.time()
 
         for attempt in range(1, MAX_RETRIES + 1):
-            rc, out = run_arcana("bars", "build", spec, PAIR, timeout=3600)
+            rc, out = run_arcana("bars", "build", spec, PAIR, timeout=7200)
             if rc == 0:
                 break
             log(f"  Attempt {attempt} failed for {spec}")
@@ -321,11 +333,25 @@ def main() -> int:
 
         elapsed = time.time() - t0
         if rc == 0:
-            # Count bars
+            # Count bars — for auto specs, get table name from CLI output
             pair_norm = PAIR.lower().replace("-", "_")
-            tbl = f"bars_{spec.replace('.', '_')}_{pair_norm}"
-            bar_count = psql_int(f"SELECT COUNT(*) FROM {tbl};")
-            log(f"  {spec}: {bar_count:,} bars in {elapsed:.0f}s")
+            # Auto-calibrated specs resolve to e.g. tick_3847 at build time.
+            # The CLI output contains "Building tick_3847 bars for ETH-USD..."
+            # Parse the resolved bar_type from the output.
+            resolved = spec
+            for line in out.splitlines():
+                if line.startswith("Building ") and " bars for " in line:
+                    resolved = line.split("Building ")[1].split(" bars for ")[0]
+                    break
+                elif line.startswith("Auto-calibrated: "):
+                    resolved = line.split("Auto-calibrated: ")[1].split(" (")[0]
+                    break
+            tbl = f"bars_{resolved.replace('.', '_')}_{pair_norm}"
+            try:
+                bar_count = psql_int(f"SELECT COUNT(*) FROM {tbl};")
+                log(f"  {resolved}: {bar_count:,} bars in {elapsed:.0f}s")
+            except Exception:
+                log(f"  {spec}: completed in {elapsed:.0f}s (could not count bars)")
         else:
             record_failure(f"bars build {spec}", f"exit {rc}")
             log(f"  {spec}: FAILED after {MAX_RETRIES} attempts")
