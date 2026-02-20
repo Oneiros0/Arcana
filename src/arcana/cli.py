@@ -12,12 +12,15 @@ from typing import TYPE_CHECKING
 
 import click
 
-from arcana.config import DatabaseConfig
+from arcana.config import ArcanaConfig, DatabaseConfig
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.pipeline import (
     DAEMON_INTERVAL,
     build_bars,
     calibrate_dollar_threshold,
+    calibrate_info_bar_initial_expected,
+    calibrate_tick_threshold,
+    calibrate_volume_threshold,
     ingest_backfill,
     run_daemon,
 )
@@ -60,9 +63,19 @@ def _setup_logging(log_level: str) -> None:
     default="INFO",
     help="Set logging verbosity.",
 )
-def cli(log_level: str) -> None:
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to arcana.toml config file.",
+)
+@click.pass_context
+def cli(ctx: click.Context, log_level: str, config_path: str | None) -> None:
     """Arcana — Quantitative trading data pipeline."""
     _setup_logging(log_level)
+    ctx.ensure_object(dict)
+    ctx.obj["config"] = ArcanaConfig.find_and_load(config_path)
 
 
 # --- Database commands ---
@@ -238,15 +251,23 @@ _BAR_SPEC_PATTERN = re.compile(
     r"^(tick|volume|dollar)_(\d+(?:\.\d+)?)$"
     r"|^time_(\d+)([smhd])$"
     r"|^(tib|vib|dib|trb|vrb|drb)_(\d+)$"
-    r"|^dollar_auto(?:_(\d+))?$"
+    r"|^(dollar|tick|volume)_auto(?:_(\d+))?$"
 )
 
 
-def _parse_bar_spec(spec: str, source: str, pair: str, db: Database | None = None) -> BarBuilder:
+def _parse_bar_spec(
+    spec: str,
+    source: str,
+    pair: str,
+    db: Database | None = None,
+    bars_per_day: int = 50,
+    initial_expected: float | None = None,
+) -> BarBuilder:
     """Parse a bar spec string like 'tick_500' or 'tib_20' into a BarBuilder.
 
-    For 'dollar_auto' specs, a database connection is required to calibrate
-    the threshold from trade data.
+    For auto-calibrated specs (*_auto), a database connection is required.
+    For info-driven bars, E₀ is auto-calibrated from trade data when a DB
+    is available, unless overridden by initial_expected.
     """
     from arcana.bars.imbalance import (
         DollarImbalanceBarBuilder,
@@ -269,21 +290,32 @@ def _parse_bar_spec(spec: str, source: str, pair: str, db: Database | None = Non
     if not m:
         raise click.BadParameter(
             f"Invalid bar spec '{spec}'. "
-            "Expected: tick_N, volume_N, dollar_N, dollar_auto[_N], time_Nu, "
+            "Expected: tick_N, volume_N, dollar_N, "
+            "tick_auto[_N], volume_auto[_N], dollar_auto[_N], time_Nu, "
             "tib_N, vib_N, dib_N, trb_N, vrb_N, or drb_N. "
-            "Examples: tick_500, time_5m, dollar_50000, dollar_auto, dollar_auto_50, tib_20",
+            "Examples: tick_500, tick_auto, time_5m, dollar_auto_50, tib_20",
             param_hint="'BAR_SPEC'",
         )
 
-    if m.group(7) is not None or spec.startswith("dollar_auto"):
-        # dollar_auto or dollar_auto_50
+    if m.group(7) is not None:
+        # Auto-calibrated standard bars: tick_auto, volume_auto, dollar_auto
+        auto_type = m.group(7)
         if db is None:
-            raise click.UsageError("dollar_auto requires a database connection to calibrate.")
-        bars_per_day = int(m.group(7)) if m.group(7) else 50
-        threshold = calibrate_dollar_threshold(db, pair, bars_per_day, source)
-        click.echo(f"Auto-calibrated: dollar_{threshold} ({bars_per_day} bars/day target)")
-        return DollarBarBuilder(source, pair, threshold=Decimal(threshold))
-    elif m.group(1):  # tick, volume, or dollar (standard)
+            raise click.UsageError(f"{auto_type}_auto requires a database connection to calibrate.")
+        bpd = int(m.group(8)) if m.group(8) else bars_per_day
+        if auto_type == "dollar":
+            threshold = calibrate_dollar_threshold(db, pair, bpd, source)
+            click.echo(f"Auto-calibrated: dollar_{threshold} ({bpd} bars/day target)")
+            return DollarBarBuilder(source, pair, threshold=Decimal(threshold))
+        elif auto_type == "tick":
+            threshold = calibrate_tick_threshold(db, pair, bpd, source)
+            click.echo(f"Auto-calibrated: tick_{threshold} ({bpd} bars/day target)")
+            return TickBarBuilder(source, pair, threshold=threshold)
+        else:  # volume
+            threshold = calibrate_volume_threshold(db, pair, bpd, source)
+            click.echo(f"Auto-calibrated: volume_{threshold} ({bpd} bars/day target)")
+            return VolumeBarBuilder(source, pair, threshold=Decimal(str(threshold)))
+    elif m.group(1):  # tick, volume, or dollar (fixed threshold)
         bar_type = m.group(1)
         value = m.group(2)
         if bar_type == "tick":
@@ -299,6 +331,22 @@ def _parse_bar_spec(spec: str, source: str, pair: str, db: Database | None = Non
     else:  # information-driven (imbalance or run)
         bar_kind = m.group(5)
         ewma_window = int(m.group(6))
+
+        # Determine E₀: explicit override > auto-calibrate from DB > 0.0
+        e0 = initial_expected
+        if e0 is None and db is not None:
+            try:
+                e0 = calibrate_info_bar_initial_expected(
+                    db, pair, bar_kind, bars_per_day, source
+                )
+            except ValueError:
+                logging.getLogger(__name__).warning(
+                    "Could not auto-calibrate E₀ for %s — using 0.0", bar_kind
+                )
+                e0 = 0.0
+        elif e0 is None:
+            e0 = 0.0
+
         builder_map = {
             "tib": TickImbalanceBarBuilder,
             "vib": VolumeImbalanceBarBuilder,
@@ -307,7 +355,9 @@ def _parse_bar_spec(spec: str, source: str, pair: str, db: Database | None = Non
             "vrb": VolumeRunBarBuilder,
             "drb": DollarRunBarBuilder,
         }
-        return builder_map[bar_kind](source, pair, ewma_window=ewma_window)
+        return builder_map[bar_kind](
+            source, pair, ewma_window=ewma_window, initial_expected=e0
+        )
 
 
 @cli.group()
@@ -319,14 +369,21 @@ def bars() -> None:
 @bars.command("build")
 @click.argument("bar_spec")
 @click.argument("pair")
+@click.option(
+    "--rebuild", is_flag=True, default=False,
+    help="Delete existing bars and rebuild from scratch.",
+)
 @click.option("--host", default="localhost", help="Database host.")
 @click.option("--port", default=5432, type=int, help="Database port.")
 @click.option("--database", default="arcana", help="Database name.")
 @click.option("--user", default="arcana", help="Database user.")
 @click.option("--password", default="", help="Database password.")
+@click.pass_context
 def bars_build(
+    ctx: click.Context,
     bar_spec: str,
     pair: str,
+    rebuild: bool,
     host: str,
     port: int,
     database: str,
@@ -339,15 +396,17 @@ def bars_build(
 
     \b
       Standard (fixed threshold):
-        tick_500      500-trade bars
-        volume_100    100-unit volume bars
-        dollar_50000  $50k notional bars
-        dollar_auto   Auto-calibrated dollar bars (50 bars/day)
+        tick_500         500-trade bars
+        tick_auto        Auto-calibrated tick bars (50 bars/day)
+        volume_100       100-unit volume bars
+        volume_auto      Auto-calibrated volume bars
+        dollar_50000     $50k notional bars
+        dollar_auto      Auto-calibrated dollar bars (50 bars/day)
         dollar_auto_100  Auto-calibrated (100 bars/day)
-        time_5m       5-minute time bars (s/m/h/d)
+        time_5m          5-minute time bars (s/m/h/d)
 
     \b
-      Information-driven (EWMA adaptive):
+      Information-driven (EWMA adaptive, auto-calibrated E0):
         tib_20        Tick imbalance bars (EWMA window=20)
         vib_20        Volume imbalance bars
         dib_20        Dollar imbalance bars
@@ -360,6 +419,7 @@ def bars_build(
     \b
     Examples:
       arcana bars build tick_500 ETH-USD
+      arcana bars build tick_auto ETH-USD
       arcana bars build dollar_auto ETH-USD
       arcana bars build time_1h ETH-USD
       arcana bars build tib_20 ETH-USD
@@ -368,19 +428,43 @@ def bars_build(
     if not _BAR_SPEC_PATTERN.match(bar_spec):
         raise click.BadParameter(
             f"Invalid bar spec '{bar_spec}'. "
-            "Expected: tick_N, volume_N, dollar_N, dollar_auto[_N], time_Nu, "
+            "Expected: tick_N, volume_N, dollar_N, "
+            "tick_auto[_N], volume_auto[_N], dollar_auto[_N], time_Nu, "
             "tib_N, vib_N, dib_N, trb_N, vrb_N, or drb_N. "
-            "Examples: tick_500, time_5m, dollar_50000, dollar_auto, tib_20",
+            "Examples: tick_500, tick_auto, time_5m, dollar_auto, tib_20",
             param_hint="'BAR_SPEC'",
         )
+
+    # Look up config overrides for this bar spec
+    arcana_cfg = ctx.obj.get("config") if ctx.obj else None
+    bpd = 50
+    ie = None
+    if arcana_cfg:
+        for bar_cfg in arcana_cfg.bars:
+            if bar_cfg.spec == bar_spec:
+                bpd = bar_cfg.bars_per_day or arcana_cfg.pipeline.bars_per_day
+                ie = bar_cfg.initial_expected
+                break
+        else:
+            bpd = arcana_cfg.pipeline.bars_per_day
 
     config = _db_config_from_options(host, port, database, user, password)
 
     try:
         with Database(config) as db_conn:
-            builder = _parse_bar_spec(bar_spec, source="coinbase", pair=pair, db=db_conn)
-            click.echo(f"Building {builder.bar_type} bars for {pair}...")
-            total = build_bars(builder, db_conn, pair)
+            builder = _parse_bar_spec(
+                bar_spec,
+                source="coinbase",
+                pair=pair,
+                db=db_conn,
+                bars_per_day=bpd,
+                initial_expected=ie,
+            )
+            if rebuild:
+                click.echo(f"Rebuilding {builder.bar_type} bars for {pair} (dropping existing)...")
+            else:
+                click.echo(f"Building {builder.bar_type} bars for {pair}...")
+            total = build_bars(builder, db_conn, pair, rebuild=rebuild)
     except Exception as exc:
         click.echo(f"Failed to build bars: {exc}", err=True)
         raise SystemExit(1)

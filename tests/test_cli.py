@@ -95,6 +95,44 @@ class TestCLI:
         builder_arg = mock_build_bars.call_args[0][0]
         assert builder_arg.bar_type == "tick_500"
 
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_bars_build_rebuild_flag(self, mock_build_bars, mock_db_cls):
+        """--rebuild should pass rebuild=True to build_bars."""
+        mock_build_bars.return_value = 100
+
+        mock_db = MagicMock()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build", "--rebuild", "tick_500", "ETH-USD"])
+
+        assert result.exit_code == 0
+        assert "Rebuilding" in result.output
+        assert "100 bars built" in result.output
+        # Verify rebuild=True was passed
+        _, kwargs = mock_build_bars.call_args
+        assert kwargs["rebuild"] is True
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_bars_build_no_rebuild_by_default(self, mock_build_bars, mock_db_cls):
+        """Without --rebuild, rebuild should be False."""
+        mock_build_bars.return_value = 100
+
+        mock_db = MagicMock()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build", "tick_500", "ETH-USD"])
+
+        assert result.exit_code == 0
+        assert "Building" in result.output
+        _, kwargs = mock_build_bars.call_args
+        assert kwargs["rebuild"] is False
+
     def test_bars_build_invalid_spec(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["bars", "build", "invalid_spec", "ETH-USD"])
@@ -228,3 +266,64 @@ class TestParseBarSpec:
         assert result.exit_code == 0
         assert "250 bars built" in result.output
         mock_calibrate.assert_called_once()
+
+    # ── Auto-calibrated tick/volume bars ──────────────────────────────
+
+    def test_tick_auto_spec(self):
+        db = MagicMock()
+        # 500k trades over 100 days → threshold=100
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        builder = _parse_bar_spec("tick_auto", "coinbase", "ETH-USD", db=db)
+        assert builder.bar_type == "tick_100"
+
+    def test_tick_auto_with_bars_per_day(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        builder = _parse_bar_spec("tick_auto_100", "coinbase", "ETH-USD", db=db)
+        # 500k / (100 * 100) = 50
+        assert builder.bar_type == "tick_50"
+
+    def test_tick_auto_requires_db(self):
+        import click
+
+        with pytest.raises(click.exceptions.UsageError, match="database connection"):
+            _parse_bar_spec("tick_auto", "coinbase", "ETH-USD")
+
+    def test_volume_auto_spec(self):
+        db = MagicMock()
+        # 100k volume over 100 days → 20 per bar
+        db.get_trade_volume_stats.return_value = (500_000.0, 100_000.0, 100.0)
+        builder = _parse_bar_spec("volume_auto", "coinbase", "ETH-USD", db=db)
+        assert builder.bar_type == "volume_20"
+
+    def test_volume_auto_requires_db(self):
+        import click
+
+        with pytest.raises(click.exceptions.UsageError, match="database connection"):
+            _parse_bar_spec("volume_auto", "coinbase", "ETH-USD")
+
+    # ── Info-bar auto-calibration of E₀ ──────────────────────────────
+
+    def test_info_bar_auto_calibrates_e0_when_db_available(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
+
+        builder = _parse_bar_spec("tib_10", "coinbase", "ETH-USD", db=db)
+        assert builder.bar_type == "tib_10"
+        # E[T]=100, bias=0.2, contrib=1.0 → E0=20.0
+        assert builder._ewma.expected == pytest.approx(20.0)
+
+    def test_info_bar_uses_explicit_initial_expected(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
+
+        builder = _parse_bar_spec(
+            "tib_10", "coinbase", "ETH-USD", db=db, initial_expected=999.0
+        )
+        assert builder._ewma.expected == pytest.approx(999.0)
+
+    def test_info_bar_fallback_to_zero_without_db(self):
+        builder = _parse_bar_spec("tib_10", "coinbase", "ETH-USD")
+        assert builder._ewma.expected == 0.0

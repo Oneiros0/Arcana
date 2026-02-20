@@ -44,6 +44,27 @@ class TestTickImbalanceBarBuilder:
         b = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
         assert b.bar_type == "tib_10"
 
+    def test_initial_expected_propagates(self):
+        """initial_expected should set the EWMA starting threshold."""
+        b = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10, initial_expected=50.0
+        )
+        assert b._ewma.expected == pytest.approx(50.0)
+
+    def test_initial_expected_reduces_bar_count(self):
+        """High initial_expected should produce far fewer bars than E0=0."""
+        trades = [_trade(i, side="buy") for i in range(100)]
+
+        builder_zero = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
+        bars_zero = builder_zero.process_trades(trades)
+
+        builder_high = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10, initial_expected=50.0
+        )
+        bars_high = builder_high.process_trades(trades)
+
+        assert len(bars_high) < len(bars_zero)
+
     def test_emission_on_buy_sequence(self):
         """All-buy sequence: imbalance grows by +1 each trade.
 

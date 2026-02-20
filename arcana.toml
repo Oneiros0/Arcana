@@ -1,0 +1,73 @@
+# Arcana pipeline configuration
+# Bar thresholds are auto-calibrated from trade data to target bars_per_day.
+# Override any bar's parameters below, or set enabled = false to skip it.
+
+[pipeline]
+pair = "ETH-USD"
+source = "coinbase"
+bars_per_day = 50              # default target for auto-calibrated bars
+
+[database]
+host = "localhost"
+port = 5432
+database = "arcana"
+user = "arcana"
+password = "arcana"
+
+# Standard bars — auto-calibrated thresholds
+[[bars]]
+spec = "tick_auto"
+
+[[bars]]
+spec = "volume_auto"
+
+[[bars]]
+spec = "dollar_auto"
+
+# Time bars — fixed intervals
+[[bars]]
+spec = "time_5m"
+
+[[bars]]
+spec = "time_1h"
+
+# Information-driven bars — EWMA window controls adaptation speed,
+# E0 is auto-calibrated from trade data (Prado Ch. 2)
+[[bars]]
+spec = "tib_10"
+
+[[bars]]
+spec = "vib_10"
+
+[[bars]]
+spec = "dib_10"
+
+[[bars]]
+spec = "trb_10"
+
+[[bars]]
+spec = "vrb_10"
+
+[[bars]]
+spec = "drb_10"
+
+# Examples of customization:
+#
+# Override bars_per_day for a specific bar type:
+# [[bars]]
+# spec = "dollar_auto"
+# bars_per_day = 100
+#
+# Override E0 for an info bar instead of auto-calibrating:
+# [[bars]]
+# spec = "tib_10"
+# initial_expected = 500.0
+#
+# Disable a bar type:
+# [[bars]]
+# spec = "trb_10"
+# enabled = false
+#
+# Use a fixed threshold instead of auto:
+# [[bars]]
+# spec = "tick_500"

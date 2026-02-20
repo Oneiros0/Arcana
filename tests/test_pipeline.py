@@ -14,6 +14,9 @@ from arcana.pipeline import (
     _format_eta,
     build_bars,
     calibrate_dollar_threshold,
+    calibrate_info_bar_initial_expected,
+    calibrate_tick_threshold,
+    calibrate_volume_threshold,
     ingest_backfill,
     run_daemon,
 )
@@ -290,6 +293,45 @@ class TestBuildBars:
         assert db.insert_bars.called
 
     @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_rebuild_deletes_existing(self, mock_shutdown):
+        """rebuild=True should delete all existing bars before building."""
+        mock_shutdown.return_value.should_stop = False
+        trades = _make_trades(10)
+
+        db = MagicMock()
+        db.delete_all_bars.return_value = 500
+        db.get_last_bar_time.return_value = None
+        db.get_first_timestamp.return_value = trades[0].timestamp
+        db.get_trades_since.return_value = trades
+        db.insert_bars.return_value = 1
+
+        builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
+        total = build_bars(builder, db, "ETH-USD", rebuild=True)
+
+        # Should have deleted existing bars
+        db.delete_all_bars.assert_called_once_with("tick_5", "ETH-USD", "coinbase")
+        # After delete, last_bar_time returns None → fresh build
+        assert total >= 2
+        assert db.insert_bars.called
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    def test_build_bars_rebuild_false_no_delete(self, mock_shutdown):
+        """rebuild=False should NOT call delete_all_bars."""
+        mock_shutdown.return_value.should_stop = False
+        trades = _make_trades(10)
+
+        db = MagicMock()
+        db.get_last_bar_time.return_value = None
+        db.get_first_timestamp.return_value = trades[0].timestamp
+        db.get_trades_since.return_value = trades
+        db.insert_bars.return_value = 1
+
+        builder = TickBarBuilder("coinbase", "ETH-USD", threshold=5)
+        build_bars(builder, db, "ETH-USD", rebuild=False)
+
+        db.delete_all_bars.assert_not_called()
+
+    @patch("arcana.pipeline.GracefulShutdown")
     def test_build_bars_restores_ewma_state(self, mock_shutdown):
         """When resuming, should restore EWMA state from last bar metadata."""
         mock_shutdown.return_value.should_stop = False
@@ -371,6 +413,186 @@ class TestCalibrateDollarThreshold:
 
         with pytest.raises(ValueError, match="No trade data"):
             calibrate_dollar_threshold(db, "ETH-USD")
+
+
+class TestCalibrateTickThreshold:
+    def test_basic(self):
+        """threshold = total_trades / (days * bars_per_day)."""
+        db = MagicMock()
+        # 500,000 trades over 100 days, 50 bars/day → 100 ticks/bar
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        threshold = calibrate_tick_threshold(db, "ETH-USD", bars_per_day=50)
+        assert threshold == 100
+
+    def test_rounds_to_integer(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (501_000.0, 50_000.0, 100.0)
+        threshold = calibrate_tick_threshold(db, "ETH-USD", bars_per_day=50)
+        assert isinstance(threshold, int)
+        assert threshold == 100  # 501000/5000 = 100.2, rounds to 100
+
+    def test_minimum_one(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (10.0, 1.0, 100.0)
+        threshold = calibrate_tick_threshold(db, "ETH-USD", bars_per_day=50)
+        assert threshold >= 1
+
+    def test_no_data_raises(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = None
+        with pytest.raises(ValueError, match="No trade data"):
+            calibrate_tick_threshold(db, "ETH-USD")
+
+
+class TestCalibrateVolumeThreshold:
+    def test_basic(self):
+        db = MagicMock()
+        # 100,000 volume over 100 days, 50 bars/day → 20 units/bar
+        db.get_trade_volume_stats.return_value = (500_000.0, 100_000.0, 100.0)
+        threshold = calibrate_volume_threshold(db, "ETH-USD", bars_per_day=50)
+        assert threshold == 20
+
+    def test_no_data_raises(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = None
+        with pytest.raises(ValueError, match="No trade data"):
+            calibrate_volume_threshold(db, "ETH-USD")
+
+
+class TestCalibrateInfoBarInitialExpected:
+    def test_tib_balanced_market(self):
+        """TIB in balanced market (P=0.5): E0 = E[T] * 0.1 * 1.0."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.50)  # balanced
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib", bars_per_day=50)
+        # E[T] = 500000/(100*50) = 100, bias = max(|2*0.5-1|, 0.1) = 0.1, contrib = 1.0
+        assert e0 == pytest.approx(100 * 0.1 * 1.0)
+
+    def test_tib_directional_market(self):
+        """TIB with P[buy]=0.6: E0 = E[T] * 0.2 * 1.0."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib", bars_per_day=50)
+        # bias = |2*0.6 - 1| = 0.2
+        assert e0 == pytest.approx(100 * 0.2 * 1.0)
+
+    def test_vib(self):
+        """VIB: contribution = avg_size."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "vib", bars_per_day=50)
+        # E[T]=100, bias=|2*0.55-1|=0.1, contrib=0.1
+        assert e0 == pytest.approx(100 * 0.1 * 0.1)
+
+    def test_dib(self):
+        """DIB: contribution = avg_dollar_volume."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "dib", bars_per_day=50)
+        assert e0 == pytest.approx(100 * 0.1 * 285.0)
+
+    def test_trb_uses_geometric_run_length(self):
+        """TRB E₀ = p_same / (1-p_same) × E[|c|], where c=1.0 for ticks."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb", bars_per_day=50)
+        # P[buy]=0.60 → p_same=0.60, E[run]=0.60/0.40=1.5, contrib=1.0
+        assert e0 == pytest.approx(1.5 * 1.0)
+
+    def test_trb_differs_from_tib(self):
+        """Run bars use geometric run length, not imbalance formula."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
+
+        e0_tib = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib")
+        e0_trb = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb")
+        # TIB: E[T]*bias*c = 100*0.2*1.0 = 20.0
+        # TRB: p_same/(1-p_same)*c = 0.6/0.4*1.0 = 1.5
+        assert e0_tib != e0_trb
+        assert e0_tib == pytest.approx(20.0)
+        assert e0_trb == pytest.approx(1.5)
+
+    def test_vrb_uses_volume_contribution(self):
+        """VRB E₀ = p_same / (1-p_same) × avg_size."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "vrb", bars_per_day=50)
+        # P[buy]=0.55 → p_same=0.55, E[run]=0.55/0.45≈1.222, contrib=0.1
+        assert e0 == pytest.approx(0.55 / 0.45 * 0.1)
+
+    def test_drb_uses_dollar_contribution(self):
+        """DRB E₀ = p_same / (1-p_same) × avg_dollar."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "drb", bars_per_day=50)
+        # p_same=0.55, E[run]=0.55/0.45≈1.222, contrib=285.0
+        assert e0 == pytest.approx(0.55 / 0.45 * 285.0)
+
+    def test_run_bar_p_same_clamped_low(self):
+        """p_same is floored at 0.55 for stability."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.50)  # balanced
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb")
+        # P[buy]=0.50 → p_same=max(0.50,0.50)=0.50, clamped to 0.55
+        # E[run]=0.55/0.45≈1.222, contrib=1.0
+        assert e0 == pytest.approx(0.55 / 0.45 * 1.0)
+
+    def test_run_bar_p_same_clamped_high(self):
+        """p_same is capped at 0.95 to prevent degenerate thresholds."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.99)  # extreme
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb")
+        # P[buy]=0.99 → p_same=0.99, clamped to 0.95
+        # E[run]=0.95/0.05=19.0, contrib=1.0
+        assert e0 == pytest.approx(19.0)
+
+    def test_direction_bias_floor(self):
+        """When P=0.5 exactly, floor at 0.1 prevents degenerate zero."""
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.500)
+
+        e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib")
+        assert e0 > 0  # should not be zero
+
+    def test_unknown_bar_kind_raises(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.50)
+        with pytest.raises(ValueError, match="Unknown bar kind"):
+            calibrate_info_bar_initial_expected(db, "ETH-USD", "xyz")
+
+    def test_no_trade_data_raises(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = None
+        with pytest.raises(ValueError, match="No trade data"):
+            calibrate_info_bar_initial_expected(db, "ETH-USD", "tib")
+
+    def test_no_imbalance_data_raises(self):
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = None
+        with pytest.raises(ValueError, match="Insufficient trade data"):
+            calibrate_info_bar_initial_expected(db, "ETH-USD", "tib")
 
 
 class TestFormatEta:

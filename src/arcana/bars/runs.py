@@ -29,9 +29,15 @@ class _RunBarBuilder(BarBuilder):
     expected value.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
         super().__init__(source, pair)
-        self._ewma = EWMAEstimator(window=ewma_window)
+        self._ewma = EWMAEstimator(window=ewma_window, initial_value=initial_expected)
         self._buy_run: float = 0.0
         self._sell_run: float = 0.0
         self._prev_price: Decimal | None = None
@@ -101,8 +107,14 @@ class TickRunBarBuilder(_RunBarBuilder):
     EWMA threshold.  Pure count-based run detection.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
-        super().__init__(source, pair, ewma_window)
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
+        super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
 
     @property
@@ -120,8 +132,14 @@ class VolumeRunBarBuilder(_RunBarBuilder):
     exceeds the EWMA threshold.  Large trades contribute more.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
-        super().__init__(source, pair, ewma_window)
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
+        super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
 
     @property
@@ -140,8 +158,14 @@ class DollarRunBarBuilder(_RunBarBuilder):
     variant — normalizes for both trade size and price.
     """
 
-    def __init__(self, source: str, pair: str, ewma_window: int) -> None:
-        super().__init__(source, pair, ewma_window)
+    def __init__(
+        self,
+        source: str,
+        pair: str,
+        ewma_window: int,
+        initial_expected: float = 0.0,
+    ) -> None:
+        super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
 
     @property
