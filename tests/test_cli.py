@@ -19,7 +19,7 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ["db", "init", "--help"])
         assert result.exit_code == 0
-        assert "--host" in result.output
+        assert "Initialize the database schema" in result.output
 
     def test_ingest_help(self):
         runner = CliRunner()
@@ -28,9 +28,9 @@ class TestCLI:
         assert "--since" in result.output
         assert "PAIR" in result.output
 
-    def test_run_help(self):
+    def test_summon_help(self):
         runner = CliRunner()
-        result = runner.invoke(cli, ["run", "--help"])
+        result = runner.invoke(cli, ["summon", "--help"])
         assert result.exit_code == 0
         assert "--interval" in result.output
 
@@ -156,7 +156,7 @@ class TestCLI:
         mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["run", "ETH-USD"])
+        result = runner.invoke(cli, ["summon", "ETH-USD"])
 
         assert result.exit_code != 0
         assert "No trades found" in result.output

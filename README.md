@@ -1,11 +1,11 @@
 # Arcana
 
-**Quantitative trading data pipeline** — ingest raw trades from crypto exchanges, construct Prado-style sampling bars, and maintain a live data feed.
+**Quantitative trading data pipeline** -ingest raw trades from crypto exchanges, construct Prado-style sampling bars, and maintain a live data feed.
 
 Built on the methodology from Marcos Lopez de Prado's *Advances in Financial Machine Learning*.
 
 ```
-arcana db init  →  arcana ingest ETH-USD --since 2025-01-01  →  arcana bars build tick_500 ETH-USD  →  arcana run ETH-USD
+arcana db init  →  arcana ingest ETH-USD --since 2025-01-01  →  arcana bars build tick_500 ETH-USD  →  arcana summon ETH-USD
 ```
 
 [![CI](https://github.com/Oneiros0/Arcana/actions/workflows/ci.yml/badge.svg)](https://github.com/Oneiros0/Arcana/actions/workflows/ci.yml)
@@ -19,7 +19,7 @@ arcana db init  →  arcana ingest ETH-USD --since 2025-01-01  →  arcana bars 
 ```
                           ┌─────────────────────────────────────────────┐
                           │                 Arcana CLI                  │
-                          │    db init │ ingest │ bars build │ run      │
+                          │    db init │ ingest │ bars build │ summon   │
                           └──────┬──────────┬──────────┬────────┬──────┘
                                  │          │          │        │
                  ┌───────────────┘          │          │        └──────────────┐
@@ -82,7 +82,7 @@ arcana db init  →  arcana ingest ETH-USD --since 2025-01-01  →  arcana bars 
 
 Traditional time bars (1-min, 5-min, 1-hour candles) sample at fixed intervals regardless of market activity. This creates statistical problems:
 
-**Standard Bars** — fixed threshold sampling:
+**Standard Bars** -fixed threshold sampling:
 
 | Bar Type | Trigger | Use Case |
 |----------|---------|----------|
@@ -91,7 +91,7 @@ Traditional time bars (1-min, 5-min, 1-hour candles) sample at fixed intervals r
 | **Volume** | Every *V* units traded | Normalizes by participation |
 | **Dollar** | Every *$D* notional | Normalizes by value exchanged |
 
-**Information-Driven Bars** (Prado Ch. 2) — adaptive EWMA-based sampling:
+**Information-Driven Bars** (Prado Ch. 2) -adaptive EWMA-based sampling:
 
 | Bar Type | Trigger | Use Case |
 |----------|---------|----------|
@@ -164,7 +164,7 @@ arcana ingest ETH-USD --since 2025-01-01 --until 2025-06-01
 arcana status ETH-USD
 ```
 
-Backfill walks forward through time in 15-minute windows, committing trades in batches of 1,000. It is **resumable** — if interrupted, it picks up from the last stored trade.
+Backfill walks forward through time in 15-minute windows, committing trades in batches of 1,000. It is **resumable** -if interrupted, it picks up from the last stored trade.
 
 ### Build Bars
 
@@ -186,14 +186,14 @@ arcana bars build drb_10 ETH-USD        # Dollar run bars
 
 Bar construction is also resumable. On restart, it continues from the last emitted bar. Information-driven bars restore their EWMA state from the metadata of the last emitted bar.
 
-### Run the Daemon
+### Summon the Daemon
 
 ```bash
 # Start live polling (every 15 minutes by default)
-arcana run ETH-USD
+arcana summon ETH-USD
 
 # Custom poll interval (5 minutes)
-arcana run ETH-USD --interval 300
+arcana summon ETH-USD --interval 300
 ```
 
 The daemon detects any gap between the last stored trade and now, catches up automatically, then enters the poll loop. Ctrl+C triggers a graceful shutdown with buffer flush.
@@ -208,7 +208,7 @@ arcana [--log-level DEBUG|INFO|WARNING|ERROR]
   db init          Initialize database schema (idempotent)
   ingest PAIR      Bulk ingest historical trades
   bars build SPEC PAIR   Construct bars from stored trades
-  run PAIR         Start the live ingestion daemon
+  summon PAIR      Start the live ingestion daemon
   status [PAIR]    Show trade counts and data gap
 ```
 
@@ -249,12 +249,12 @@ The EWMA window controls how quickly the adaptive threshold responds to changes.
 ```
 src/arcana/
 ├── __init__.py              # Package root, version
-├── cli.py                   # Click CLI — all user-facing commands
+├── cli.py                   # Click CLI -all user-facing commands
 ├── config.py                # DatabaseConfig, ArcanaConfig (Pydantic)
 ├── pipeline.py              # Orchestration: backfill, daemon, bar construction
 ├── ingestion/
-│   ├── base.py              # DataSource ABC — pluggable exchange interface
-│   ├── coinbase.py          # CoinbaseSource — Advanced Trade REST API
+│   ├── base.py              # DataSource ABC -pluggable exchange interface
+│   ├── coinbase.py          # CoinbaseSource -Advanced Trade REST API
 │   └── models.py            # Trade model (Pydantic, Decimal precision)
 ├── bars/
 │   ├── base.py              # Bar model, Accumulator, BarBuilder ABC
@@ -329,13 +329,13 @@ Bar
 
 2. **Stateful bar builders.** The accumulator carries state across batch calls. This is essential: a bar boundary can fall in the middle of a database fetch. Builder state persists until `flush()`.
 
-3. **Idempotent writes.** `INSERT ... ON CONFLICT DO NOTHING` on all upserts. Safe to re-run any operation — backfill, bar construction, daemon — without duplicating data.
+3. **Idempotent writes.** `INSERT ... ON CONFLICT DO NOTHING` on all upserts. Safe to re-run any operation -backfill, bar construction, daemon -without duplicating data.
 
 4. **Resumable everything.** Backfill resumes from the last stored trade. Bar construction resumes from the last emitted bar. The daemon detects and fills gaps on startup.
 
 5. **Graceful shutdown.** SIGINT/SIGTERM handlers flush in-progress buffers before exit. No data loss on Ctrl+C.
 
-6. **Pluggable data sources.** The `DataSource` ABC defines the exchange interface. Adding Binance or Kraken means implementing one class — the pipeline, bar builders, and storage layer remain unchanged.
+6. **Pluggable data sources.** The `DataSource` ABC defines the exchange interface. Adding Binance or Kraken means implementing one class -the pipeline, bar builders, and storage layer remain unchanged.
 
 ---
 
@@ -440,4 +440,4 @@ class EntropyBarBuilder(BarBuilder):
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE) for details.
+Apache 2.0 -see [LICENSE](LICENSE) for details.

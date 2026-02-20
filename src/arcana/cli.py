@@ -72,7 +72,22 @@ def _setup_logging(log_level: str) -> None:
 )
 @click.pass_context
 def cli(ctx: click.Context, log_level: str, config_path: str | None) -> None:
-    """Arcana — Quantitative trading data pipeline."""
+    """Arcana - Quantitative trading data pipeline.
+
+    \b
+    Quick start:
+      1. arcana db init                            Initialize the database
+      2. arcana ingest ETH-USD --since 2025-01-01  Backfill historical trades
+      3. arcana bars build tick_500 ETH-USD        Build bars from trade data
+      4. arcana summon ETH-USD                     Start the live daemon
+
+    \b
+    Database connection:
+      Set via environment variables (recommended):
+        ARCANA_DB_HOST  ARCANA_DB_PORT  ARCANA_DB_NAME
+        ARCANA_DB_USER  ARCANA_DB_PASSWORD
+      Or pass --host/--port/--database/--user/--password to any command.
+    """
     _setup_logging(log_level)
     ctx.ensure_object(dict)
     ctx.obj["config"] = ArcanaConfig.find_and_load(config_path)
@@ -83,18 +98,18 @@ def cli(ctx: click.Context, log_level: str, config_path: str | None) -> None:
 
 @cli.group()
 def db() -> None:
-    """Database management commands."""
+    """Database setup and management."""
     pass
 
 
 @db.command("init")
-@click.option("--host", default="localhost", help="Database host.")
-@click.option("--port", default=5432, type=int, help="Database port.")
-@click.option("--database", default="arcana", help="Database name.")
-@click.option("--user", default="arcana", help="Database user.")
-@click.option("--password", default="", help="Database password.")
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
 def db_init(host: str, port: int, database: str, user: str, password: str) -> None:
-    """Initialize database schema (creates tables if they don't exist)."""
+    """Initialize the database schema."""
     config = _db_config_from_options(host, port, database, user, password)
     try:
         with Database(config) as db:
@@ -122,11 +137,11 @@ def db_init(host: str, port: int, database: str, user: str, password: str) -> No
     type=click.DateTime(formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
     help="End date for backfill (default: now).",
 )
-@click.option("--host", default="localhost", help="Database host.")
-@click.option("--port", default=5432, type=int, help="Database port.")
-@click.option("--database", default="arcana", help="Database name.")
-@click.option("--user", default="arcana", help="Database user.")
-@click.option("--password", default="", help="Database password.")
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
 def ingest(
     pair: str,
     since: datetime,
@@ -137,9 +152,14 @@ def ingest(
     user: str,
     password: str,
 ) -> None:
-    """Bulk ingest historical trades for a trading pair.
+    """Backfill historical trades from Coinbase.
 
-    Example: arcana ingest ETH-USD --since 2025-01-01
+    Resumes automatically if interrupted.
+
+    \b
+    Examples:
+      arcana ingest ETH-USD --since 2025-01-01
+      arcana ingest BTC-USD --since 2025-01-01 --until 2025-06-01
     """
     since_utc = since.replace(tzinfo=UTC)
     until_utc = until.replace(tzinfo=UTC) if until else None
@@ -166,12 +186,12 @@ def ingest(
     type=int,
     help="Poll interval in seconds (default: 900 = 15 min).",
 )
-@click.option("--host", default="localhost", help="Database host.")
-@click.option("--port", default=5432, type=int, help="Database port.")
-@click.option("--database", default="arcana", help="Database name.")
-@click.option("--user", default="arcana", help="Database user.")
-@click.option("--password", default="", help="Database password.")
-def run(
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
+def summon(
     pair: str,
     interval: int,
     host: str,
@@ -180,17 +200,20 @@ def run(
     user: str,
     password: str,
 ) -> None:
-    """Run the ingestion daemon for a trading pair.
+    """Start the live ingestion daemon.
 
     Polls Coinbase for new trades every --interval seconds.
     Catches up any missed trades on startup.
 
-    Example: arcana run ETH-USD
+    \b
+    Examples:
+      arcana summon ETH-USD
+      arcana summon ETH-USD --interval 300
     """
     config = _db_config_from_options(host, port, database, user, password)
 
-    click.echo(f"Starting daemon for {pair} (poll every {interval}s)...")
-    click.echo("Press Ctrl+C to stop.")
+    click.echo(f"Summoning daemon for {pair} (poll every {interval}s)...")
+    click.echo("Press Ctrl+C to banish.")
 
     try:
         with CoinbaseSource() as source, Database(config) as db_conn:
@@ -199,7 +222,7 @@ def run(
         click.echo(f"Error: {exc}", err=True)
         raise SystemExit(1)
 
-    click.echo("Daemon stopped.")
+    click.echo("Daemon banished.")
 
 
 # --- Status command ---
@@ -207,11 +230,11 @@ def run(
 
 @cli.command()
 @click.argument("pair", required=False)
-@click.option("--host", default="localhost", help="Database host.")
-@click.option("--port", default=5432, type=int, help="Database port.")
-@click.option("--database", default="arcana", help="Database name.")
-@click.option("--user", default="arcana", help="Database user.")
-@click.option("--password", default="", help="Database password.")
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
 def status(
     pair: str | None,
     host: str,
@@ -220,9 +243,12 @@ def status(
     user: str,
     password: str,
 ) -> None:
-    """Show ingestion status and trade counts.
+    """Show trade counts and data freshness.
 
-    Example: arcana status ETH-USD
+    \b
+    Examples:
+      arcana status             Show all pairs
+      arcana status ETH-USD     Show a specific pair
     """
     config = _db_config_from_options(host, port, database, user, password)
 
@@ -362,7 +388,7 @@ def _parse_bar_spec(
 
 @cli.group()
 def bars() -> None:
-    """Bar construction commands."""
+    """Build and manage bar data."""
     pass
 
 
@@ -373,11 +399,11 @@ def bars() -> None:
     "--rebuild", is_flag=True, default=False,
     help="Delete existing bars and rebuild from scratch.",
 )
-@click.option("--host", default="localhost", help="Database host.")
-@click.option("--port", default=5432, type=int, help="Database port.")
-@click.option("--database", default="arcana", help="Database name.")
-@click.option("--user", default="arcana", help="Database user.")
-@click.option("--password", default="", help="Database password.")
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
 @click.pass_context
 def bars_build(
     ctx: click.Context,
