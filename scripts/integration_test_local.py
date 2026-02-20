@@ -198,7 +198,7 @@ def main() -> int:
     else:
         _fail("bars build on empty DB", f"exit {rc}, {out[:200]}")
 
-    rc, _ = run_arcana("run", PAIR, "--interval", "10", timeout=30)
+    rc, _ = run_arcana("summon", PAIR, "--interval", "10", timeout=30)
     if rc != 0:
         _pass("daemon refuses to start with no data")
     else:
@@ -380,7 +380,7 @@ def main() -> int:
         creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
 
     daemon_proc = subprocess.Popen(
-        ["arcana", "--log-level", "INFO", "run", PAIR,
+        ["arcana", "--log-level", "INFO", "summon", PAIR,
          "--interval", str(DAEMON_INTERVAL)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
