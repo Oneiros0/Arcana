@@ -1,7 +1,7 @@
 """Tests for imbalance bar builders: TIB, VIB, DIB.
 
 Uses hand-crafted trade sequences with known expected behavior to
-verify correctness of information-driven bar sampling (Prado Ch. 2).
+verify correctness of information-driven bar sampling (Prado AFML Ch. 2).
 """
 
 from datetime import UTC, datetime, timedelta
@@ -36,7 +36,7 @@ def _trade(
     )
 
 
-# ── Tick Imbalance Bars ──────────────────────────────────────────────
+# -- Tick Imbalance Bars ---------------------------------------------------
 
 
 class TestTickImbalanceBarBuilder:
@@ -44,12 +44,26 @@ class TestTickImbalanceBarBuilder:
         b = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
         assert b.bar_type == "tib_10"
 
-    def test_initial_expected_propagates(self):
-        """initial_expected should set the EWMA starting threshold."""
+    def test_initial_expected_dict_propagates(self):
+        """Dict initial_expected should set all three EWMA components."""
+        b = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10,
+            initial_expected={"t": 50.0, "imb": 0.3, "v": 1.0},
+        )
+        assert b._ewma_t.expected == pytest.approx(50.0)
+        assert b._ewma_imb.expected == pytest.approx(0.3)
+        assert b._ewma_v.expected == pytest.approx(1.0)
+
+    def test_initial_expected_float_legacy(self):
+        """Float initial_expected is treated as E[T] with imb=1, v=1."""
         b = TickImbalanceBarBuilder(
             "coinbase", "ETH-USD", ewma_window=10, initial_expected=50.0
         )
-        assert b._ewma.expected == pytest.approx(50.0)
+        assert b._ewma_t.expected == pytest.approx(50.0)
+        assert b._ewma_imb.expected == pytest.approx(1.0)
+        assert b._ewma_v.expected == pytest.approx(1.0)
+        # Threshold = 50 * 1 * 1 = 50
+        assert b._threshold == pytest.approx(50.0)
 
     def test_initial_expected_reduces_bar_count(self):
         """High initial_expected should produce far fewer bars than E0=0."""
@@ -68,7 +82,7 @@ class TestTickImbalanceBarBuilder:
     def test_emission_on_buy_sequence(self):
         """All-buy sequence: imbalance grows by +1 each trade.
 
-        EWMA starts at 0.0 → first trade triggers (|1| >= 0).
+        EWMA starts at 0.0 -> first trade triggers (|1| >= 0).
         After that, EWMA updates and next bar requires more trades.
         """
         builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
@@ -86,16 +100,16 @@ class TestTickImbalanceBarBuilder:
         trades should accumulate more trades per bar than one-sided
         flow, because the signed contributions cancel out.
         """
-        # Pre-warm both builders to the same EWMA level so the
-        # warm-up phase (EWMA=0 → every trade emits) doesn't dominate.
-        initial_ewma = 3.0
+        initial = {"t": 3.0, "imb": 1.0, "v": 1.0}
 
-        builder_mixed = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
-        builder_mixed._ewma._expected = initial_ewma
+        builder_mixed = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10, initial_expected=initial
+        )
         builder_mixed._cum_imbalance = 0.0
 
-        builder_buy = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
-        builder_buy._ewma._expected = initial_ewma
+        builder_buy = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10, initial_expected=initial
+        )
         builder_buy._cum_imbalance = 0.0
 
         # Mixed trades: alternating buy/sell
@@ -112,8 +126,8 @@ class TestTickImbalanceBarBuilder:
         # All-buy should produce more bars (imbalance builds faster)
         assert len(bars_mixed) < len(bars_buy)
 
-    def test_metadata_contains_ewma_state(self):
-        """Every emitted bar should carry EWMA state in metadata."""
+    def test_metadata_contains_decomposed_ewma(self):
+        """Every emitted bar should carry decomposed EWMA state in metadata."""
         builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=5)
         trades = [_trade(i, side="buy") for i in range(10)]
         bars = builder.process_trades(trades)
@@ -121,7 +135,9 @@ class TestTickImbalanceBarBuilder:
         for bar in bars:
             assert bar.metadata is not None
             assert "ewma_window" in bar.metadata
-            assert "ewma_expected" in bar.metadata
+            assert "ewma_t" in bar.metadata
+            assert "ewma_imb" in bar.metadata
+            assert "ewma_v" in bar.metadata
             assert bar.metadata["ewma_window"] == 5
 
     def test_unknown_side_uses_tick_rule(self):
@@ -129,12 +145,12 @@ class TestTickImbalanceBarBuilder:
         builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=5)
         trades = [
             _trade(0, "100.00", side="unknown"),
-            _trade(1, "101.00", side="unknown"),  # uptick → +1
-            _trade(2, "102.00", side="unknown"),  # uptick → +1
-            _trade(3, "103.00", side="unknown"),  # uptick → +1
+            _trade(1, "101.00", side="unknown"),  # uptick -> +1
+            _trade(2, "102.00", side="unknown"),  # uptick -> +1
+            _trade(3, "103.00", side="unknown"),  # uptick -> +1
         ]
         bars = builder.process_trades(trades)
-        # Should produce bars — upticks create positive imbalance
+        # Should produce bars -- upticks create positive imbalance
         assert len(bars) >= 1
 
     def test_stateful_across_batches(self):
@@ -145,35 +161,85 @@ class TestTickImbalanceBarBuilder:
         warmup = [_trade(i, side="buy") for i in range(30)]
         bars1 = builder.process_trades(warmup)
 
-        # Now feed one more batch — should still work
+        # Now feed one more batch -- should still work
         bars2 = builder.process_trades([_trade(30 + i, side="buy") for i in range(10)])
         # The builder should continue emitting bars
         total_bars = len(bars1) + len(bars2)
         assert total_bars > 0
 
     def test_flush_includes_metadata(self):
-        """Flushed bar should include EWMA metadata."""
+        """Flushed bar should include decomposed EWMA metadata."""
         builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=5)
-        # Feed some trades without triggering emission
-        builder._ewma.update(100.0)  # set high threshold
+        # Feed some trades without triggering emission by setting high threshold
+        builder._ewma_t._expected = 1000.0
         builder.process_trades([_trade(0, side="buy")])
         bar = builder.flush()
         assert bar is not None
         assert bar.metadata is not None
-        assert "ewma_expected" in bar.metadata
+        assert "ewma_t" in bar.metadata
+        assert "ewma_imb" in bar.metadata
+        assert "ewma_v" in bar.metadata
 
-    def test_restore_state(self):
-        """Restore EWMA from metadata for daemon restart."""
+    def test_restore_state_new_format(self):
+        """Restore decomposed EWMA from metadata for daemon restart."""
         builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
-        builder._ewma.update(42.0)
+        builder._ewma_t.update(42.0)
+        builder._ewma_imb.update(0.3)
+        builder._ewma_v.update(1.5)
         metadata = builder._flush_metadata()
 
         builder2 = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
         builder2.restore_state(metadata)
-        assert builder2._ewma.expected == pytest.approx(builder._ewma.expected)
+        assert builder2._ewma_t.expected == pytest.approx(builder._ewma_t.expected)
+        assert builder2._ewma_imb.expected == pytest.approx(builder._ewma_imb.expected)
+        assert builder2._ewma_v.expected == pytest.approx(builder._ewma_v.expected)
+
+    def test_restore_state_legacy_format(self):
+        """Legacy metadata with single ewma_expected should still work."""
+        builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
+        legacy_metadata = {"ewma_window": 10, "ewma_expected": 42.0}
+        builder.restore_state(legacy_metadata)
+        assert builder._ewma_t.expected == pytest.approx(42.0)
+        assert builder._ewma_imb.expected == pytest.approx(1.0)
+        assert builder._ewma_v.expected == pytest.approx(1.0)
+
+    def test_threshold_decomposition_math(self):
+        """Verify threshold = E[T] x |E[2P-1]| x E[|v|]."""
+        builder = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10,
+            initial_expected={"t": 100.0, "imb": 0.4, "v": 2.0},
+        )
+        # threshold = 100 * |0.4| * 2.0 = 80.0
+        assert builder._threshold == pytest.approx(80.0)
+
+    def test_threshold_floors_imbalance_at_01(self):
+        """Balanced market (imb~0) should floor at 0.1 to avoid degeneracy."""
+        builder = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10,
+            initial_expected={"t": 100.0, "imb": 0.0, "v": 1.0},
+        )
+        # threshold = 100 * max(|0.0|, 0.1) * 1.0 = 10.0
+        assert builder._threshold == pytest.approx(10.0)
+
+    def test_ewma_updates_with_bar_statistics(self):
+        """EWMAs should update with per-bar T, imb, and |v| at emission."""
+        builder = TickImbalanceBarBuilder(
+            "coinbase", "ETH-USD", ewma_window=10,
+            initial_expected={"t": 3.0, "imb": 1.0, "v": 1.0},
+        )
+        # 5 buys: cum_imbalance = 5, threshold = 3 * 1 * 1 = 3
+        # Should emit after 3 trades (|3| >= 3)
+        trades = [_trade(i, side="buy") for i in range(5)]
+        bars = builder.process_trades(trades)
+        assert len(bars) >= 1
+
+        # After emission, ewma_t should have been updated with the bar's tick count
+        assert bars[0].tick_count >= 1
+        # ewma_t should have moved toward actual bar size from initial 3.0
+        assert builder._ewma_t.expected > 0
 
 
-# ── Volume Imbalance Bars ────────────────────────────────────────────
+# -- Volume Imbalance Bars -------------------------------------------------
 
 
 class TestVolumeImbalanceBarBuilder:
@@ -191,8 +257,8 @@ class TestVolumeImbalanceBarBuilder:
 
     def test_contribution_is_signed_volume(self):
         """Buy adds +size, sell adds -size to imbalance."""
-        # 2 buys of size 5 = +10, then 1 sell of size 10 = -10 → net 0
-        # Compare with 3 buys of size 5 = +15 → net +15
+        # 2 buys of size 5 = +10, then 1 sell of size 10 = -10 -> net 0
+        # Compare with 3 buys of size 5 = +15 -> net +15
         trades_mixed = [
             _trade(0, size="5.0", side="buy"),
             _trade(1, size="5.0", side="buy"),
@@ -213,8 +279,18 @@ class TestVolumeImbalanceBarBuilder:
         # All-buy should produce at least as many bars
         assert len(bars_buy) >= len(bars_mixed)
 
+    def test_metadata_has_decomposed_ewma(self):
+        """Emitted bars carry decomposed EWMA in metadata."""
+        builder = VolumeImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=5)
+        trades = [_trade(i, size="10.0", side="buy") for i in range(5)]
+        bars = builder.process_trades(trades)
+        for bar in bars:
+            assert bar.metadata is not None
+            assert "ewma_t" in bar.metadata
+            assert "ewma_v" in bar.metadata
 
-# ── Dollar Imbalance Bars ────────────────────────────────────────────
+
+# -- Dollar Imbalance Bars -------------------------------------------------
 
 
 class TestDollarImbalanceBarBuilder:

@@ -339,7 +339,12 @@ class TestBuildBars:
         from arcana.bars.imbalance import TickImbalanceBarBuilder
 
         last_bar_time = datetime(2026, 2, 10, 14, 0, 0, tzinfo=UTC)
-        saved_metadata = {"ewma_window": 10, "ewma_expected": 42.5}
+        saved_metadata = {
+            "ewma_window": 10,
+            "ewma_t": 42.5,
+            "ewma_imb": 0.3,
+            "ewma_v": 1.0,
+        }
 
         db = MagicMock()
         db.get_last_bar_time.return_value = last_bar_time
@@ -350,9 +355,11 @@ class TestBuildBars:
         builder = TickImbalanceBarBuilder("coinbase", "ETH-USD", ewma_window=10)
         build_bars(builder, db, "ETH-USD")
 
-        # EWMA should have been restored from metadata
-        assert builder._ewma.expected == pytest.approx(42.5)
-        assert builder._ewma.window == 10
+        # Decomposed EWMAs should have been restored from metadata
+        assert builder._ewma_t.expected == pytest.approx(42.5)
+        assert builder._ewma_imb.expected == pytest.approx(0.3)
+        assert builder._ewma_v.expected == pytest.approx(1.0)
+        assert builder._ewma_t.window == 10
 
 
 class TestRunDaemon:
@@ -460,25 +467,31 @@ class TestCalibrateVolumeThreshold:
 
 
 class TestCalibrateInfoBarInitialExpected:
+    """Calibration now returns decomposed dicts instead of single floats."""
+
     def test_tib_balanced_market(self):
-        """TIB in balanced market (P=0.5): E0 = E[T] * 0.1 * 1.0."""
+        """TIB in balanced market (P=0.5): imb=0, t=E[T], v=1.0."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
-        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.50)  # balanced
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.50)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib", bars_per_day=50)
-        # E[T] = 500000/(100*50) = 100, bias = max(|2*0.5-1|, 0.1) = 0.1, contrib = 1.0
-        assert e0 == pytest.approx(100 * 0.1 * 1.0)
+        # E[T] = 500000/(100*50) = 100
+        assert isinstance(e0, dict)
+        assert e0["t"] == pytest.approx(100.0)
+        assert e0["imb"] == pytest.approx(0.0)  # 2*0.5 - 1 = 0
+        assert e0["v"] == pytest.approx(1.0)
 
     def test_tib_directional_market(self):
-        """TIB with P[buy]=0.6: E0 = E[T] * 0.2 * 1.0."""
+        """TIB with P[buy]=0.6: imb=0.2."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib", bars_per_day=50)
-        # bias = |2*0.6 - 1| = 0.2
-        assert e0 == pytest.approx(100 * 0.2 * 1.0)
+        assert e0["t"] == pytest.approx(100.0)
+        assert e0["imb"] == pytest.approx(0.2)  # 2*0.6 - 1 = 0.2
+        assert e0["v"] == pytest.approx(1.0)
 
     def test_vib(self):
         """VIB: contribution = avg_size."""
@@ -487,8 +500,9 @@ class TestCalibrateInfoBarInitialExpected:
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "vib", bars_per_day=50)
-        # E[T]=100, bias=|2*0.55-1|=0.1, contrib=0.1
-        assert e0 == pytest.approx(100 * 0.1 * 0.1)
+        assert e0["t"] == pytest.approx(100.0)
+        assert e0["imb"] == pytest.approx(0.1)  # 2*0.55 - 1 = 0.1
+        assert e0["v"] == pytest.approx(0.1)
 
     def test_dib(self):
         """DIB: contribution = avg_dollar_volume."""
@@ -497,82 +511,83 @@ class TestCalibrateInfoBarInitialExpected:
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "dib", bars_per_day=50)
-        assert e0 == pytest.approx(100 * 0.1 * 285.0)
+        assert e0["t"] == pytest.approx(100.0)
+        assert e0["v"] == pytest.approx(285.0)
 
-    def test_trb_uses_geometric_run_length(self):
-        """TRB E₀ = p_same / (1-p_same) × E[|c|], where c=1.0 for ticks."""
+    def test_trb_returns_decomposed_dict(self):
+        """TRB returns dict with t, p_dom, v."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb", bars_per_day=50)
-        # P[buy]=0.60 → p_same=0.60, E[run]=0.60/0.40=1.5, contrib=1.0
-        assert e0 == pytest.approx(1.5 * 1.0)
+        assert isinstance(e0, dict)
+        assert e0["t"] == pytest.approx(100.0)
+        assert e0["p_dom"] == pytest.approx(0.6)  # max(0.6, 0.4)
+        assert e0["v"] == pytest.approx(1.0)
 
     def test_trb_differs_from_tib(self):
-        """Run bars use geometric run length, not imbalance formula."""
+        """Run bars return p_dom, imbalance bars return imb."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.60)
 
         e0_tib = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib")
         e0_trb = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb")
-        # TIB: E[T]*bias*c = 100*0.2*1.0 = 20.0
-        # TRB: p_same/(1-p_same)*c = 0.6/0.4*1.0 = 1.5
-        assert e0_tib != e0_trb
-        assert e0_tib == pytest.approx(20.0)
-        assert e0_trb == pytest.approx(1.5)
+        # TIB has "imb" key, TRB has "p_dom" key
+        assert "imb" in e0_tib
+        assert "p_dom" in e0_trb
+        assert e0_tib["imb"] == pytest.approx(0.2)
+        assert e0_trb["p_dom"] == pytest.approx(0.6)
 
     def test_vrb_uses_volume_contribution(self):
-        """VRB E₀ = p_same / (1-p_same) × avg_size."""
+        """VRB: v = avg_size."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "vrb", bars_per_day=50)
-        # P[buy]=0.55 → p_same=0.55, E[run]=0.55/0.45≈1.222, contrib=0.1
-        assert e0 == pytest.approx(0.55 / 0.45 * 0.1)
+        assert e0["v"] == pytest.approx(0.1)
+        assert e0["p_dom"] == pytest.approx(0.55)
 
     def test_drb_uses_dollar_contribution(self):
-        """DRB E₀ = p_same / (1-p_same) × avg_dollar."""
+        """DRB: v = avg_dollar."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "drb", bars_per_day=50)
-        # p_same=0.55, E[run]=0.55/0.45≈1.222, contrib=285.0
-        assert e0 == pytest.approx(0.55 / 0.45 * 285.0)
+        assert e0["v"] == pytest.approx(285.0)
+        assert e0["p_dom"] == pytest.approx(0.55)
 
-    def test_run_bar_p_same_clamped_low(self):
-        """p_same is floored at 0.55 for stability."""
+    def test_run_bar_p_dom_preserved_raw(self):
+        """Calibration returns raw p_dom; builder applies clamping."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
-        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.50)  # balanced
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.50)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb")
-        # P[buy]=0.50 → p_same=max(0.50,0.50)=0.50, clamped to 0.55
-        # E[run]=0.55/0.45≈1.222, contrib=1.0
-        assert e0 == pytest.approx(0.55 / 0.45 * 1.0)
+        # Raw p_dom = max(0.5, 0.5) = 0.5 — NOT clamped in calibration
+        assert e0["p_dom"] == pytest.approx(0.5)
 
-    def test_run_bar_p_same_clamped_high(self):
-        """p_same is capped at 0.95 to prevent degenerate thresholds."""
+    def test_run_bar_extreme_p_dom(self):
+        """Extreme buy fraction should produce p_dom near 1.0."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
-        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.99)  # extreme
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.99)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "trb")
-        # P[buy]=0.99 → p_same=0.99, clamped to 0.95
-        # E[run]=0.95/0.05=19.0, contrib=1.0
-        assert e0 == pytest.approx(19.0)
+        assert e0["p_dom"] == pytest.approx(0.99)
 
-    def test_direction_bias_floor(self):
-        """When P=0.5 exactly, floor at 0.1 prevents degenerate zero."""
+    def test_direction_bias_preserved_raw(self):
+        """When P=0.5, imb=0.0 — builder applies floor, not calibration."""
         db = MagicMock()
         db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
         db.get_imbalance_stats.return_value = (0.1, 285.0, 0.500)
 
         e0 = calibrate_info_bar_initial_expected(db, "ETH-USD", "tib")
-        assert e0 > 0  # should not be zero
+        assert e0["imb"] == pytest.approx(0.0)
+        assert e0["t"] > 0  # E[T] should be positive
 
     def test_unknown_bar_kind_raises(self):
         db = MagicMock()

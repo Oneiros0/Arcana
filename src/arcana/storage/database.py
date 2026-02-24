@@ -610,9 +610,13 @@ class Database:
             return None
 
     def get_imbalance_stats(
-        self, pair: str, source: str = "coinbase", sample_limit: int = 100_000
+        self, pair: str, source: str = "coinbase"
     ) -> tuple[float, float, float] | None:
-        """Compute trade-level statistics from a recent sample for E₀ calibration.
+        """Compute trade-level statistics from ALL trades for E₀ calibration.
+
+        Uses the full dataset (not a sample) for deterministic, reproducible
+        calibration — running the same command on the same data always
+        produces the same E₀ regardless of when the command is run.
 
         Returns:
             (avg_size, avg_dollar_volume, buy_fraction) or None if insufficient data.
@@ -624,12 +628,9 @@ class Database:
                 "  AVG(size)::float, "
                 "  AVG(price * size)::float, "
                 "  SUM(CASE WHEN side = 'buy' THEN 1 ELSE 0 END)::float / COUNT(*)::float "
-                "FROM ("
-                "  SELECT price, size, side FROM raw_trades "
-                "  WHERE pair = %s AND source = %s "
-                "  ORDER BY timestamp DESC LIMIT %s"
-                ") sub",
-                (pair, source, sample_limit),
+                "FROM raw_trades "
+                "WHERE pair = %s AND source = %s",
+                (pair, source),
             )
             row = cur.fetchone()
             if row and row[0] is not None:

@@ -1,13 +1,18 @@
-"""Information-driven imbalance bar builders (Prado Ch. 2).
+"""Information-driven imbalance bar builders (Prado AFML Ch. 2, Def. 2.3).
 
 Imbalance bars sample when the order-flow imbalance exceeds an adaptive
-(EWMA) threshold.  This makes them sensitive to informed trading — the
-bars "speed up" when smart money is moving the market.
+threshold.  This makes them sensitive to informed trading -- the bars
+"speed up" when smart money is moving the market.
+
+Per Prado, the threshold is decomposed as:
+  E[T] x |E[2P[b=1]-1]| x E[|v|]
+where each factor is tracked by a separate EWMA for faster adaptation
+to market regime changes.
 
 Three variants weight the imbalance differently:
-  - Tick Imbalance (TIB): ±1 per trade
-  - Volume Imbalance (VIB): ±volume per trade
-  - Dollar Imbalance (DIB): ±dollar_volume per trade
+  - Tick Imbalance (TIB): +/-1 per trade
+  - Volume Imbalance (VIB): +/-volume per trade
+  - Dollar Imbalance (DIB): +/-dollar_volume per trade
 """
 
 from __future__ import annotations
@@ -24,34 +29,73 @@ class _ImbalanceBarBuilder(BarBuilder):
     """Private base for all imbalance bar builders.
 
     Tracks cumulative imbalance (signed sum of per-trade contributions)
-    and emits a bar when |cumulative_imbalance| >= EWMA expected value.
+    and emits a bar when |cumulative_imbalance| >= adaptive threshold.
 
-    The EWMA adapts the threshold over time based on observed imbalance
-    magnitudes — bars become harder to emit in balanced markets and
-    easier to emit during directional flow.
+    The threshold is decomposed per Prado AFML Def. 2.3:
+      threshold = E[T] x |E[2P-1]| x E[|v|]
+    Each factor is tracked by a separate EWMA, enabling faster adaptation
+    to market regime changes than a monolithic E[|theta|] tracker.
     """
+
+    # Minimum |E[2P-1]| to prevent degenerate bars in balanced markets
+    _MIN_DIRECTIONAL_BIAS = 0.1
 
     def __init__(
         self,
         source: str,
         pair: str,
         ewma_window: int,
-        initial_expected: float = 0.0,
+        initial_expected: dict | float | None = None,
     ) -> None:
         super().__init__(source, pair)
-        self._ewma = EWMAEstimator(window=ewma_window, initial_value=initial_expected)
+
+        # Decompose initial expected into three EWMA components
+        if isinstance(initial_expected, dict):
+            init_t = initial_expected.get("t", 0.0)
+            init_imb = initial_expected.get("imb", 0.0)
+            init_v = initial_expected.get("v", 1.0)
+        elif isinstance(initial_expected, (int, float)) and initial_expected > 0:
+            # Legacy single-value: treat as composite threshold.
+            # Decompose as: threshold ~ T, with imb=1 and v=1.
+            # Self-corrects within ~window bars.
+            init_t = float(initial_expected)
+            init_imb = 1.0
+            init_v = 1.0
+        else:
+            init_t = 0.0
+            init_imb = 0.0
+            init_v = 1.0
+
+        self._ewma_t = EWMAEstimator(window=ewma_window, initial_value=init_t)
+        self._ewma_imb = EWMAEstimator(window=ewma_window, initial_value=init_imb)
+        self._ewma_v = EWMAEstimator(window=ewma_window, initial_value=init_v)
+
         self._cum_imbalance: float = 0.0
+        self._buy_count: int = 0
+        self._sum_abs_contrib: float = 0.0
         self._prev_price: Decimal | None = None
         self._prev_sign: int = 1  # default to +1 until first tick rule fires
 
-    # ── Subclass contract ────────────────────────────────────────────
+    # -- Threshold --------------------------------------------------------
+
+    @property
+    def _threshold(self) -> float:
+        """Adaptive threshold: E[T] x |E[2P-1]| x E[|v|].
+
+        Floors |E[2P-1]| at 0.1 to prevent degenerate zero-threshold
+        in balanced markets (Prado's recommendation).
+        """
+        imb = max(abs(self._ewma_imb.expected), self._MIN_DIRECTIONAL_BIAS)
+        return self._ewma_t.expected * imb * self._ewma_v.expected
+
+    # -- Subclass contract ------------------------------------------------
 
     @abstractmethod
     def _imbalance_contribution(self, trade: Trade, sign: int) -> float:
         """Signed contribution of this trade to cumulative imbalance."""
         ...
 
-    # ── Trade direction resolution ───────────────────────────────────
+    # -- Trade direction resolution ---------------------------------------
 
     def _resolve_sign(self, trade: Trade) -> int:
         """Get trade sign, falling back to tick rule if side is unknown."""
@@ -64,41 +108,82 @@ class _ImbalanceBarBuilder(BarBuilder):
         self._prev_price = trade.price
         return sign if sign != 0 else self._prev_sign
 
-    # ── Core logic ───────────────────────────────────────────────────
+    # -- Core logic -------------------------------------------------------
 
     def process_trade(self, trade: Trade) -> Bar | None:
         sign = self._resolve_sign(trade)
         self._acc.add(trade)
-        self._cum_imbalance += self._imbalance_contribution(trade, sign)
+        contribution = self._imbalance_contribution(trade, sign)
+        self._cum_imbalance += contribution
+
+        # Track per-bar statistics for decomposed EWMA updates
+        if sign > 0:
+            self._buy_count += 1
+        self._sum_abs_contrib += abs(contribution)
 
         # Emit when imbalance exceeds adaptive threshold
-        if abs(self._cum_imbalance) >= self._ewma.expected and self._acc.tick_count > 0:
-            imbalance_magnitude = abs(self._cum_imbalance)
-            self._ewma.update(imbalance_magnitude)
+        threshold = self._threshold
+        if abs(self._cum_imbalance) >= threshold and self._acc.tick_count > 0:
+            # Update decomposed EWMAs from this bar's observed statistics
+            bar_ticks = self._acc.tick_count
+            p_buy = self._buy_count / bar_ticks
+            self._ewma_t.update(float(bar_ticks))
+            self._ewma_imb.update(2.0 * p_buy - 1.0)
+            self._ewma_v.update(self._sum_abs_contrib / bar_ticks)
+
             metadata = self._flush_metadata()
             self._cum_imbalance = 0.0
+            self._buy_count = 0
+            self._sum_abs_contrib = 0.0
             return self._emit_and_reset(metadata=metadata)
 
         return None
 
-    # ── Metadata hooks ───────────────────────────────────────────────
+    # -- Metadata hooks ---------------------------------------------------
 
     def _flush_metadata(self) -> dict:
-        return self._ewma.to_dict()
+        return {
+            "ewma_window": self._ewma_t.window,
+            "ewma_t": self._ewma_t.expected,
+            "ewma_imb": self._ewma_imb.expected,
+            "ewma_v": self._ewma_v.expected,
+        }
 
     def restore_state(self, metadata: dict) -> None:
-        """Restore EWMA state from bar metadata (daemon restart)."""
-        self._ewma = EWMAEstimator.from_dict(metadata)
+        """Restore EWMA state from bar metadata (daemon restart).
+
+        Handles both the new decomposed format and legacy single-EWMA format.
+        """
+        window = metadata.get("ewma_window", self._ewma_t.window)
+
+        if "ewma_t" in metadata:
+            # New decomposed format
+            self._ewma_t = EWMAEstimator(
+                window=window, initial_value=metadata["ewma_t"]
+            )
+            self._ewma_imb = EWMAEstimator(
+                window=window, initial_value=metadata.get("ewma_imb", 0.0)
+            )
+            self._ewma_v = EWMAEstimator(
+                window=window, initial_value=metadata.get("ewma_v", 1.0)
+            )
+        elif "ewma_expected" in metadata:
+            # Legacy single-value format — use as ewma_t, self-corrects
+            self._ewma_t = EWMAEstimator(
+                window=window, initial_value=metadata["ewma_expected"]
+            )
+            self._ewma_imb = EWMAEstimator(window=window, initial_value=1.0)
+            self._ewma_v = EWMAEstimator(window=window, initial_value=1.0)
 
 
-# ── Concrete imbalance builders ──────────────────────────────────────────────
+# -- Concrete imbalance builders ------------------------------------------
 
 
 class TickImbalanceBarBuilder(_ImbalanceBarBuilder):
-    """Tick Imbalance Bar (TIB): ±1 per trade.
+    """Tick Imbalance Bar (TIB): +/-1 per trade.
 
     Emits when the signed tick count exceeds the EWMA threshold.
-    Pure count-based — insensitive to trade size or price.
+    Pure count-based -- insensitive to trade size or price.
     """
 
     def __init__(
@@ -106,7 +191,7 @@ class TickImbalanceBarBuilder(_ImbalanceBarBuilder):
         source: str,
         pair: str,
         ewma_window: int,
-        initial_expected: float = 0.0,
+        initial_expected: dict | float | None = None,
     ) -> None:
         super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
@@ -120,7 +205,7 @@ class TickImbalanceBarBuilder(_ImbalanceBarBuilder):
 
 
 class VolumeImbalanceBarBuilder(_ImbalanceBarBuilder):
-    """Volume Imbalance Bar (VIB): ±volume per trade.
+    """Volume Imbalance Bar (VIB): +/-volume per trade.
 
     Emits when the signed volume imbalance exceeds the EWMA threshold.
     Sensitive to trade size but not price level.
@@ -131,7 +216,7 @@ class VolumeImbalanceBarBuilder(_ImbalanceBarBuilder):
         source: str,
         pair: str,
         ewma_window: int,
-        initial_expected: float = 0.0,
+        initial_expected: dict | float | None = None,
     ) -> None:
         super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window
@@ -145,10 +230,10 @@ class VolumeImbalanceBarBuilder(_ImbalanceBarBuilder):
 
 
 class DollarImbalanceBarBuilder(_ImbalanceBarBuilder):
-    """Dollar Imbalance Bar (DIB): ±dollar_volume per trade.
+    """Dollar Imbalance Bar (DIB): +/-dollar_volume per trade.
 
     Emits when the signed dollar-volume imbalance exceeds the EWMA
-    threshold.  The most economically meaningful variant — normalizes
+    threshold.  The most economically meaningful variant -- normalizes
     for both trade size and price level.
     """
 
@@ -157,7 +242,7 @@ class DollarImbalanceBarBuilder(_ImbalanceBarBuilder):
         source: str,
         pair: str,
         ewma_window: int,
-        initial_expected: float = 0.0,
+        initial_expected: dict | float | None = None,
     ) -> None:
         super().__init__(source, pair, ewma_window, initial_expected)
         self._ewma_window = ewma_window

@@ -36,22 +36,22 @@ enabled=false
 # Information-driven bars — EWMA window controls adaptation speed,
 # E0 is auto-calibrated from trade data (Prado Ch. 2)
 [[bars]]
-spec = "tib_10"
+spec = "tib_20"
 
 [[bars]]
-spec = "vib_5"
+spec = "vib_200"
 
 [[bars]]
-spec = "dib_5"
+spec = "dib_200"
 
 [[bars]]
-spec = "trb_10"
+spec = "trb_20"
 
 [[bars]]
-spec = "vrb_10"
+spec = "vrb_40"
 
 [[bars]]
-spec = "drb_8"
+spec = "drb_40"
 
 # Examples of customization:
 #

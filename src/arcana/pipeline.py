@@ -371,26 +371,26 @@ def calibrate_info_bar_initial_expected(
     bar_kind: str,
     bars_per_day: int = 50,
     source: str = "coinbase",
-) -> float:
-    """Calibrate E₀ for information-driven bars (Prado Ch. 2).
+) -> dict:
+    """Calibrate decomposed EWMA components for information-driven bars.
+
+    Returns a dict of EWMA initial values rather than a single scalar,
+    enabling the builder to track E[T], E[imbalance], and E[|v|]
+    separately for faster regime adaptation (Prado AFML Ch. 2).
 
     Imbalance bars (tib/vib/dib):
-      E₀ = E[T] × max(|2P[buy]-1|, 0.1) × E[|contribution|]
-      Where E[T] = expected ticks per bar, the cumulative imbalance
-      grows proportional to trades × direction bias.
+      {"t": E[T], "imb": 2*P[buy]-1, "v": E[|contribution|]}
+      Threshold = E[T] x |E[2P-1]| x E[|v|]
 
     Run bars (trb/vrb/drb):
-      E₀ = E[run_length] × E[|contribution|]
-      Where E[run_length] = p_same / (1 - p_same) is the expected
-      geometric run length before a direction change, and
-      p_same = max(P[buy], 1-P[buy]) is the probability of the
-      dominant direction continuing.
+      {"t": E[T], "p_dom": max(P[buy], P[sell]), "v": E[|contribution|]}
+      Threshold = E[T] x E[P_dominant] x E[|v|]
 
     Args:
         bar_kind: One of 'tib', 'vib', 'dib', 'trb', 'vrb', 'drb'.
 
     Returns:
-        Initial expected value for the EWMA estimator.
+        Dict of decomposed initial values for EWMA estimators.
 
     Raises:
         ValueError: If insufficient trade data or unknown bar_kind.
@@ -402,7 +402,7 @@ def calibrate_info_bar_initial_expected(
     total_trades, _, days = trade_stats
     expected_ticks_per_bar = total_trades / (days * bars_per_day)
 
-    # Imbalance statistics from recent trades
+    # Trade-level statistics from ALL trades (deterministic)
     imbalance_stats = db.get_imbalance_stats(pair, source)
     if imbalance_stats is None:
         raise ValueError(f"Insufficient trade data for {pair} imbalance stats.")
@@ -425,29 +425,34 @@ def calibrate_info_bar_initial_expected(
         avg_contribution = avg_dollar
 
     if bar_kind in imbalance_kinds:
-        # Imbalance: cumulative signed sum grows ~ E[T] × |2P-1|
-        direction_bias = max(abs(2 * buy_fraction - 1), 0.1)
-        e0 = expected_ticks_per_bar * direction_bias * avg_contribution
+        # Imbalance: threshold = E[T] x |2P-1| x E[|v|]
+        imb = 2.0 * buy_fraction - 1.0
+        e0 = {
+            "t": expected_ticks_per_bar,
+            "imb": imb,
+            "v": avg_contribution,
+        }
+        threshold = expected_ticks_per_bar * max(abs(imb), 0.1) * avg_contribution
         logger.info(
-            "Calibrated E₀ for %s on %s: %.2f "
-            "(E[T]=%.0f ticks, P[buy]=%.3f, bias=%.3f, E[|c|]=%.4f)",
-            bar_kind, pair, e0,
-            expected_ticks_per_bar, buy_fraction, direction_bias, avg_contribution,
+            "Calibrated E₀ for %s on %s: threshold=%.2f "
+            "(E[T]=%.0f, imb=%.3f, E[|v|]=%.4f, P[buy]=%.3f)",
+            bar_kind, pair, threshold,
+            expected_ticks_per_bar, imb, avg_contribution, buy_fraction,
         )
     else:
-        # Run bars: expected geometric run length before direction change.
-        # p_same = probability the next trade continues the dominant direction.
-        # E[run] = p_same / (1 - p_same) for a geometric distribution.
-        # Floor p_same at 0.55 and cap at 0.95 for numerical stability.
-        p_same = max(buy_fraction, 1 - buy_fraction)
-        p_same = min(max(p_same, 0.55), 0.95)
-        expected_run_length = p_same / (1 - p_same)
-        e0 = expected_run_length * avg_contribution
+        # Run bars: threshold = E[T] x P_dominant x E[|v|]
+        p_dom = max(buy_fraction, 1.0 - buy_fraction)
+        e0 = {
+            "t": expected_ticks_per_bar,
+            "p_dom": p_dom,
+            "v": avg_contribution,
+        }
+        threshold = expected_ticks_per_bar * p_dom * avg_contribution
         logger.info(
-            "Calibrated E₀ for %s on %s: %.2f "
-            "(P[same]=%.3f, E[run]=%.1f trades, E[|c|]=%.4f)",
-            bar_kind, pair, e0,
-            p_same, expected_run_length, avg_contribution,
+            "Calibrated E₀ for %s on %s: threshold=%.2f "
+            "(E[T]=%.0f, P[dom]=%.3f, E[|v|]=%.4f)",
+            bar_kind, pair, threshold,
+            expected_ticks_per_bar, p_dom, avg_contribution,
         )
 
     return e0
@@ -502,10 +507,20 @@ def build_bars(
         last_metadata = db.get_last_bar_metadata(builder.bar_type, pair, source)
         if last_metadata:
             builder.restore_state(last_metadata)
-            logger.info(
-                "Restored builder state from last bar metadata (EWMA=%.4f)",
-                last_metadata.get("ewma_expected", 0.0),
-            )
+            if "ewma_t" in last_metadata:
+                logger.info(
+                    "Restored builder state (E[T]=%.1f, E[imb/p]=%.3f, E[v]=%.4f)",
+                    last_metadata.get("ewma_t", 0),
+                    last_metadata.get(
+                        "ewma_imb", last_metadata.get("ewma_p_dom", 0)
+                    ),
+                    last_metadata.get("ewma_v", 0),
+                )
+            else:
+                logger.info(
+                    "Restored builder state from legacy metadata (EWMA=%.4f)",
+                    last_metadata.get("ewma_expected", 0.0),
+                )
 
         # Delete bars from the resume point onward — the last bar batch
         # may have been incomplete, and plain INSERT (no upsert) requires
