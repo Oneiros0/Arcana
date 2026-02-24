@@ -204,27 +204,45 @@ class TestParseBarSpec:
     # ── Information-driven bar specs ─────────────────────────────────
 
     def test_tib_spec(self):
-        builder = _parse_bar_spec("tib_20", "coinbase", "ETH-USD")
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+        builder = _parse_bar_spec("tib_20", "coinbase", "ETH-USD", db=db)
         assert builder.bar_type == "tib_20"
 
     def test_vib_spec(self):
-        builder = _parse_bar_spec("vib_10", "coinbase", "ETH-USD")
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+        builder = _parse_bar_spec("vib_10", "coinbase", "ETH-USD", db=db)
         assert builder.bar_type == "vib_10"
 
     def test_dib_spec(self):
-        builder = _parse_bar_spec("dib_50", "coinbase", "ETH-USD")
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+        builder = _parse_bar_spec("dib_50", "coinbase", "ETH-USD", db=db)
         assert builder.bar_type == "dib_50"
 
     def test_trb_spec(self):
-        builder = _parse_bar_spec("trb_10", "coinbase", "ETH-USD")
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+        builder = _parse_bar_spec("trb_10", "coinbase", "ETH-USD", db=db)
         assert builder.bar_type == "trb_10"
 
     def test_vrb_spec(self):
-        builder = _parse_bar_spec("vrb_20", "coinbase", "ETH-USD")
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+        builder = _parse_bar_spec("vrb_20", "coinbase", "ETH-USD", db=db)
         assert builder.bar_type == "vrb_20"
 
     def test_drb_spec(self):
-        builder = _parse_bar_spec("drb_30", "coinbase", "ETH-USD")
+        db = MagicMock()
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+        builder = _parse_bar_spec("drb_30", "coinbase", "ETH-USD", db=db)
         assert builder.bar_type == "drb_30"
 
     # ── Auto-calibrated dollar bars ──────────────────────────────────
@@ -311,8 +329,10 @@ class TestParseBarSpec:
 
         builder = _parse_bar_spec("tib_10", "coinbase", "ETH-USD", db=db)
         assert builder.bar_type == "tib_10"
-        # E[T]=100, bias=0.2, contrib=1.0 → E0=20.0
-        assert builder._ewma.expected == pytest.approx(20.0)
+        # Decomposed: E[T]=100, imb=0.2, v=1.0
+        assert builder._ewma_t.expected == pytest.approx(100.0)
+        assert builder._ewma_imb.expected == pytest.approx(0.2)
+        assert builder._ewma_v.expected == pytest.approx(1.0)
 
     def test_info_bar_uses_explicit_initial_expected(self):
         db = MagicMock()
@@ -322,11 +342,15 @@ class TestParseBarSpec:
         builder = _parse_bar_spec(
             "tib_10", "coinbase", "ETH-USD", db=db, initial_expected=999.0
         )
-        assert builder._ewma.expected == pytest.approx(999.0)
+        # Legacy float: treated as ewma_t with imb=1, v=1
+        assert builder._ewma_t.expected == pytest.approx(999.0)
 
-    def test_info_bar_fallback_to_zero_without_db(self):
-        builder = _parse_bar_spec("tib_10", "coinbase", "ETH-USD")
-        assert builder._ewma.expected == 0.0
+    def test_info_bar_raises_without_db(self):
+        """Without DB, info bars should raise UsageError (not silently use 0)."""
+        import click
+
+        with pytest.raises(click.exceptions.UsageError, match="No database"):
+            _parse_bar_spec("tib_10", "coinbase", "ETH-USD")
 
 
 class TestBarsBuildAll:

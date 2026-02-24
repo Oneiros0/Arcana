@@ -358,20 +358,25 @@ def _parse_bar_spec(
         bar_kind = m.group(5)
         ewma_window = int(m.group(6))
 
-        # Determine E₀: explicit override > auto-calibrate from DB > 0.0
+        # Determine E₀: explicit override > auto-calibrate from DB > error
         e0 = initial_expected
         if e0 is None and db is not None:
             try:
                 e0 = calibrate_info_bar_initial_expected(
                     db, pair, bar_kind, bars_per_day, source
                 )
-            except ValueError:
-                logging.getLogger(__name__).warning(
-                    "Could not auto-calibrate E₀ for %s — using 0.0", bar_kind
+            except ValueError as exc:
+                raise click.UsageError(
+                    f"Cannot auto-calibrate E₀ for {bar_kind}: {exc}. "
+                    "Ensure sufficient trade data exists, or set "
+                    "initial_expected in arcana.toml."
                 )
-                e0 = 0.0
         elif e0 is None:
-            e0 = 0.0
+            raise click.UsageError(
+                f"No database available to auto-calibrate E₀ for {bar_kind}. "
+                "Provide a database connection or set initial_expected "
+                "in arcana.toml."
+            )
 
         builder_map = {
             "tib": TickImbalanceBarBuilder,
