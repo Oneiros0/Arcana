@@ -16,20 +16,22 @@ password = "arcana"
 
 # Standard bars — auto-calibrated thresholds
 [[bars]]
+spec = "dollar_auto"
+
+[[bars]]
 spec = "tick_auto"
 
 [[bars]]
 spec = "volume_auto"
 
-[[bars]]
-spec = "dollar_auto"
-
 # Time bars — fixed intervals
 [[bars]]
 spec = "time_5m"
+enabled=false
 
 [[bars]]
 spec = "time_1h"
+enabled=false
 
 # Information-driven bars — EWMA window controls adaptation speed,
 # E0 is auto-calibrated from trade data (Prado Ch. 2)
@@ -37,10 +39,10 @@ spec = "time_1h"
 spec = "tib_10"
 
 [[bars]]
-spec = "vib_10"
+spec = "vib_5"
 
 [[bars]]
-spec = "dib_10"
+spec = "dib_5"
 
 [[bars]]
 spec = "trb_10"
@@ -49,7 +51,7 @@ spec = "trb_10"
 spec = "vrb_10"
 
 [[bars]]
-spec = "drb_10"
+spec = "drb_8"
 
 # Examples of customization:
 #

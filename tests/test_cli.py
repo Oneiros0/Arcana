@@ -327,3 +327,130 @@ class TestParseBarSpec:
     def test_info_bar_fallback_to_zero_without_db(self):
         builder = _parse_bar_spec("tib_10", "coinbase", "ETH-USD")
         assert builder._ewma.expected == 0.0
+
+
+class TestBarsBuildAll:
+    def _mock_db(self):
+        """Create a mock DB that supports auto-calibration and bar building."""
+        db = MagicMock()
+        # Trade stats: 500K trades, 50K volume, 100 days
+        db.get_trade_volume_stats.return_value = (500_000.0, 50_000.0, 100.0)
+        # Dollar stats: $100M over 100 days
+        db.get_dollar_volume_stats.return_value = (100_000_000.0, 100.0)
+        # Imbalance stats
+        db.get_imbalance_stats.return_value = (0.1, 285.0, 0.55)
+        # Bar building support
+        db.get_last_bar_time.return_value = None
+        db.get_first_timestamp.return_value = None  # no trades → 0 bars
+        db.get_trades_since.return_value = []
+        return db
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_build_all_help(self, mock_build, mock_db_cls):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build-all", "--help"])
+        assert result.exit_code == 0
+        assert "Build all bar types" in result.output
+        assert "--rebuild" in result.output
+        assert "--bars-per-day" in result.output
+
+    @patch("arcana.cli.ArcanaConfig.find_and_load", return_value=None)
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_build_all_default_specs(self, mock_build, mock_db_cls, _mock_cfg):
+        """Should build all 9 default bar types."""
+        mock_build.return_value = 100
+        mock_db = self._mock_db()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build-all", "ETH-USD"])
+
+        assert result.exit_code == 0
+        assert mock_build.call_count == 9
+        assert "Build-all complete" in result.output
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_build_all_rebuild_flag(self, mock_build, mock_db_cls):
+        """--rebuild should pass rebuild=True to each build_bars call."""
+        mock_build.return_value = 50
+        mock_db = self._mock_db()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build-all", "--rebuild", "ETH-USD"])
+
+        assert result.exit_code == 0
+        # Every call should have rebuild=True
+        for call in mock_build.call_args_list:
+            assert call.kwargs["rebuild"] is True
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_build_all_summary_shows_bars_per_day(self, mock_build, mock_db_cls):
+        """Summary should show bars/day and status indicators."""
+        mock_build.return_value = 5000  # 5000 bars / 100 days = 50/day → ✓
+        mock_db = self._mock_db()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build-all", "ETH-USD"])
+
+        assert result.exit_code == 0
+        assert "50.0" in result.output  # 5000/100 = 50.0 bars/day
+        # Should show status legend
+        assert "ideal" in result.output
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_build_all_custom_bpd(self, mock_build, mock_db_cls):
+        """--bars-per-day should override the global target."""
+        mock_build.return_value = 100
+        mock_db = self._mock_db()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["bars", "build-all", "ETH-USD", "--bars-per-day", "100"]
+        )
+
+        assert result.exit_code == 0
+        assert "bpd=100" in result.output
+
+    @patch("arcana.cli.ArcanaConfig.find_and_load")
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.build_bars")
+    def test_build_all_respects_config_bar_specs(
+        self, mock_build, mock_db_cls, mock_find_load
+    ):
+        """Should use bar specs from arcana.toml when available."""
+        from arcana.config import ArcanaConfig, BarSpecConfig, PipelineConfig
+
+        cfg = ArcanaConfig(
+            pipeline=PipelineConfig(bars_per_day=50),
+            bars=[
+                BarSpecConfig(spec="dollar_auto", enabled=True),
+                BarSpecConfig(spec="tib_20", enabled=True, bars_per_day=100),
+                BarSpecConfig(spec="vib_20", enabled=False),  # disabled
+            ],
+        )
+        mock_find_load.return_value = cfg
+
+        mock_build.return_value = 200
+        mock_db = self._mock_db()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["bars", "build-all", "ETH-USD"])
+
+        assert result.exit_code == 0
+        # Only 2 enabled specs
+        assert mock_build.call_count == 2
+        assert "2 bar specs from config" in result.output
