@@ -496,3 +496,139 @@ def bars_build(
         raise SystemExit(1)
 
     click.echo(f"Done. {total} bars built.")
+
+
+DEFAULT_BAR_SPECS = [
+    "dollar_auto",
+    "tick_auto",
+    "volume_auto",
+    "tib_20",
+    "vib_20",
+    "dib_20",
+    "trb_20",
+    "vrb_20",
+    "drb_20",
+]
+
+
+@bars.command("build-all")
+@click.argument("pair")
+@click.option(
+    "--rebuild", is_flag=True, default=False,
+    help="Delete existing bars and rebuild from scratch.",
+)
+@click.option(
+    "--bars-per-day", "bars_per_day", default=None, type=int,
+    help="Global bars/day target for calibration (default: 50, or from config).",
+)
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
+@click.pass_context
+def bars_build_all(
+    ctx: click.Context,
+    pair: str,
+    rebuild: bool,
+    bars_per_day: int | None,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+) -> None:
+    """Build all bar types with auto-calibrated thresholds.
+
+    Builds standard bars (dollar, tick, volume) and all six information-driven
+    bars (TIB, VIB, DIB, TRB, VRB, DRB) with thresholds/E₀ dynamically
+    calibrated from trade data to target Prado's recommended ~50 bars/day.
+
+    \b
+    Per-bar overrides (bars_per_day, initial_expected) can be set in arcana.toml:
+      [[bars]]
+      spec = "vib_20"
+      bars_per_day = 200
+
+    \b
+    Examples:
+      arcana bars build-all ETH-USD
+      arcana bars build-all ETH-USD --rebuild
+      arcana bars build-all ETH-USD --bars-per-day 100
+    """
+    arcana_cfg = ctx.obj.get("config") if ctx.obj else None
+
+    # Determine which bar specs to build
+    if arcana_cfg and arcana_cfg.bars:
+        bar_specs = [b.spec for b in arcana_cfg.bars if b.enabled]
+    else:
+        bar_specs = list(DEFAULT_BAR_SPECS)
+
+    # Global BPD: CLI flag > config > default 50
+    global_bpd = bars_per_day or (
+        arcana_cfg.pipeline.bars_per_day if arcana_cfg else 50
+    )
+
+    config = _db_config_from_options(host, port, database, user, password)
+
+    click.echo(f"Building all bars for {pair} (global bpd={global_bpd})...")
+    if arcana_cfg and arcana_cfg.bars:
+        click.echo(f"Using {len(bar_specs)} bar specs from config.")
+    else:
+        click.echo(f"Using {len(bar_specs)} default bar specs.")
+
+    try:
+        with Database(config) as db_conn:
+            results: list[tuple[str, int]] = []
+
+            for i, spec in enumerate(bar_specs, 1):
+                # Per-bar overrides from config
+                bpd = global_bpd
+                ie: float | None = None
+                if arcana_cfg:
+                    for bar_cfg in arcana_cfg.bars:
+                        if bar_cfg.spec == spec:
+                            bpd = bar_cfg.bars_per_day or global_bpd
+                            ie = bar_cfg.initial_expected
+                            break
+
+                click.echo(f"\n[{i}/{len(bar_specs)}] ", nl=False)
+
+                builder = _parse_bar_spec(
+                    spec, source="coinbase", pair=pair,
+                    db=db_conn, bars_per_day=bpd, initial_expected=ie,
+                )
+
+                action = "Rebuilding" if rebuild else "Building"
+                click.echo(f"{action} {builder.bar_type} (bpd={bpd})...")
+
+                total = build_bars(builder, db_conn, pair, rebuild=rebuild)
+                results.append((builder.bar_type, total))
+                click.echo(f"  → {total:,} bars")
+
+            # Summary
+            trade_stats = db_conn.get_trade_volume_stats(pair, "coinbase")
+            days = trade_stats[2] if trade_stats else 1.0
+
+            click.echo(f"\n{'═' * 55}")
+            click.echo(f"Build-all complete for {pair} ({days:.1f} days):\n")
+            click.echo(f"  {'Bar Type':<22} {'Bars':>10}  {'Bars/Day':>10}  Status")
+            click.echo(f"  {'─' * 22} {'─' * 10}  {'─' * 10}  {'─' * 6}")
+
+            for bar_type, count in results:
+                bpd_actual = count / days if days > 0 else 0
+                if 30 <= bpd_actual <= 100:
+                    status = "✓"
+                elif 10 <= bpd_actual < 30 or 100 < bpd_actual <= 200:
+                    status = "~"
+                else:
+                    status = "✗"
+                click.echo(
+                    f"  {bar_type:<22} {count:>10,}  {bpd_actual:>9.1f}  {status}"
+                )
+
+            click.echo("\n  ✓ = 30-100/day (ideal)  ~ = near range  ✗ = out of range")
+
+    except Exception as exc:
+        click.echo(f"Failed: {exc}", err=True)
+        raise SystemExit(1)
