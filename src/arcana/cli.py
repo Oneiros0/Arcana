@@ -288,12 +288,16 @@ def _parse_bar_spec(
     db: Database | None = None,
     bars_per_day: int = 50,
     initial_expected: float | None = None,
+    expected_ticks_constraints: tuple[float, float] | None = None,
 ) -> BarBuilder:
     """Parse a bar spec string like 'tick_500' or 'tib_20' into a BarBuilder.
 
     For auto-calibrated specs (*_auto), a database connection is required.
     For info-driven bars, E₀ is auto-calibrated from trade data when a DB
     is available, unless overridden by initial_expected.
+
+    expected_ticks_constraints: optional [min, max] E[T] clamp range.
+    Overrides auto-derived range from calibration.
     """
     from arcana.bars.imbalance import (
         DollarImbalanceBarBuilder,
@@ -378,6 +382,11 @@ def _parse_bar_spec(
                 "in arcana.toml."
             )
 
+        # Extract E[T] clamping range: explicit config > auto-derived from calibration
+        et_range = expected_ticks_constraints
+        if et_range is None and isinstance(e0, dict) and "expected_ticks_range" in e0:
+            et_range = tuple(e0.pop("expected_ticks_range"))
+
         builder_map = {
             "tib": TickImbalanceBarBuilder,
             "vib": VolumeImbalanceBarBuilder,
@@ -387,7 +396,8 @@ def _parse_bar_spec(
             "drb": DollarRunBarBuilder,
         }
         return builder_map[bar_kind](
-            source, pair, ewma_window=ewma_window, initial_expected=e0
+            source, pair, ewma_window=ewma_window, initial_expected=e0,
+            expected_ticks_range=et_range,
         )
 
 
@@ -470,11 +480,14 @@ def bars_build(
     arcana_cfg = ctx.obj.get("config") if ctx.obj else None
     bpd = 50
     ie = None
+    etc = None
     if arcana_cfg:
         for bar_cfg in arcana_cfg.bars:
             if bar_cfg.spec == bar_spec:
                 bpd = bar_cfg.bars_per_day or arcana_cfg.pipeline.bars_per_day
                 ie = bar_cfg.initial_expected
+                if bar_cfg.expected_ticks_constraints is not None:
+                    etc = tuple(bar_cfg.expected_ticks_constraints)
                 break
         else:
             bpd = arcana_cfg.pipeline.bars_per_day
@@ -490,6 +503,7 @@ def bars_build(
                 db=db_conn,
                 bars_per_day=bpd,
                 initial_expected=ie,
+                expected_ticks_constraints=etc,
             )
             if rebuild:
                 click.echo(f"Rebuilding {builder.bar_type} bars for {pair} (dropping existing)...")
@@ -590,11 +604,14 @@ def bars_build_all(
                 # Per-bar overrides from config
                 bpd = global_bpd
                 ie: float | None = None
+                etc: tuple[float, float] | None = None
                 if arcana_cfg:
                     for bar_cfg in arcana_cfg.bars:
                         if bar_cfg.spec == spec:
                             bpd = bar_cfg.bars_per_day or global_bpd
                             ie = bar_cfg.initial_expected
+                            if bar_cfg.expected_ticks_constraints is not None:
+                                etc = tuple(bar_cfg.expected_ticks_constraints)
                             break
 
                 click.echo(f"\n[{i}/{len(bar_specs)}] ", nl=False)
@@ -602,6 +619,7 @@ def bars_build_all(
                 builder = _parse_bar_spec(
                     spec, source="coinbase", pair=pair,
                     db=db_conn, bars_per_day=bpd, initial_expected=ie,
+                    expected_ticks_constraints=etc,
                 )
 
                 action = "Rebuilding" if rebuild else "Building"

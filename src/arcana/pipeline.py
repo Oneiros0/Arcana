@@ -379,12 +379,18 @@ def calibrate_info_bar_initial_expected(
     separately for faster regime adaptation (Prado AFML Ch. 2).
 
     Imbalance bars (tib/vib/dib):
-      {"t": E[T], "imb": 2*P[buy]-1, "v": E[|contribution|]}
+      {"t": E[T], "imb": 2*P[buy]-1, "v": E[|contribution|],
+       "expected_ticks_range": (min_t, max_t)}
       Threshold = E[T] x |E[2P-1]| x E[|v|]
 
     Run bars (trb/vrb/drb):
-      {"t": E[T], "p_dom": max(P[buy], P[sell]), "v": E[|contribution|]}
+      {"t": E[T], "p_dom": max(P[buy], P[sell]), "v": E[|contribution|],
+       "expected_ticks_range": (min_t, max_t)}
       Threshold = E[T] x E[P_dominant] x E[|v|]
+
+    The expected_ticks_range clamps E[T] to [E[T]/10, E[T]*10] to prevent
+    the well-known instability in balanced markets (mlfinlab's
+    exp_num_ticks_constraints).
 
     Args:
         bar_kind: One of 'tib', 'vib', 'dib', 'trb', 'vrb', 'drb'.
@@ -401,6 +407,11 @@ def calibrate_info_bar_initial_expected(
         raise ValueError(f"No trade data for {pair}. Run 'arcana ingest' first.")
     total_trades, _, days = trade_stats
     expected_ticks_per_bar = total_trades / (days * bars_per_day)
+
+    # E[T] clamping range — prevents collapse/explosion feedback loop
+    # (mlfinlab's exp_num_ticks_constraints, derived from target bars_per_day)
+    min_t = max(1.0, expected_ticks_per_bar / 10.0)
+    max_t = expected_ticks_per_bar * 10.0
 
     # Trade-level statistics from ALL trades (deterministic)
     imbalance_stats = db.get_imbalance_stats(pair, source)
@@ -431,6 +442,7 @@ def calibrate_info_bar_initial_expected(
             "t": expected_ticks_per_bar,
             "imb": imb,
             "v": avg_contribution,
+            "expected_ticks_range": (min_t, max_t),
         }
         threshold = expected_ticks_per_bar * max(abs(imb), 0.1) * avg_contribution
         logger.info(
@@ -446,6 +458,7 @@ def calibrate_info_bar_initial_expected(
             "t": expected_ticks_per_bar,
             "p_dom": p_dom,
             "v": avg_contribution,
+            "expected_ticks_range": (min_t, max_t),
         }
         threshold = expected_ticks_per_bar * p_dom * avg_contribution
         logger.info(

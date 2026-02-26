@@ -34,24 +34,41 @@ spec = "time_1h"
 enabled=false
 
 # Information-driven bars — EWMA window controls adaptation speed,
-# E0 is auto-calibrated from trade data (Prado Ch. 2)
+# E0 is auto-calibrated from trade data (Prado Ch. 2).
+# bars_per_day overcompensates for quadratic random-walk penalty.
+# expected_ticks_constraints prevents E[T] collapse/explosion.
+
+# Imbalance bars — bars_per_day=300 to seed lower E[T]
 [[bars]]
 spec = "tib_20"
+bars_per_day = 300
+expected_ticks_constraints = [100.0, 5000.0]
 
 [[bars]]
-spec = "vib_200"
+spec = "vib_20"
+bars_per_day = 300
+expected_ticks_constraints = [100.0, 5000.0]
 
 [[bars]]
-spec = "dib_200"
+spec = "dib_20"
+bars_per_day = 300
+expected_ticks_constraints = [100.0, 5000.0]
 
+# Run bars — bars_per_day=150 (no cancellation, less overcompensation needed)
 [[bars]]
 spec = "trb_20"
+bars_per_day = 150
+expected_ticks_constraints = [100.0, 10000.0]
 
 [[bars]]
-spec = "vrb_40"
+spec = "vrb_20"
+bars_per_day = 150
+expected_ticks_constraints = [100.0, 10000.0]
 
 [[bars]]
-spec = "drb_40"
+spec = "drb_20"
+bars_per_day = 150
+expected_ticks_constraints = [100.0, 10000.0]
 
 # Examples of customization:
 #
@@ -64,6 +81,13 @@ spec = "drb_40"
 # [[bars]]
 # spec = "tib_10"
 # initial_expected = 500.0
+#
+# Clamp E[T] to prevent threshold collapse/explosion in balanced markets
+# (mlfinlab's exp_num_ticks_constraints). Auto-derived from bars_per_day
+# when not set. Override with explicit [min, max]:
+# [[bars]]
+# spec = "tib_20"
+# expected_ticks_constraints = [10.0, 1000.0]
 #
 # Disable a bar type:
 # [[bars]]

@@ -35,6 +35,7 @@ class BarSpecConfig(BaseModel):
     enabled: bool = True
     bars_per_day: int | None = None
     initial_expected: float | None = None
+    expected_ticks_constraints: list[float] | None = None
 
 
 class PipelineConfig(BaseModel):
