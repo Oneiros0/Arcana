@@ -87,8 +87,9 @@ class Accumulator:
         self.time_end = trade.timestamp
         self._close = trade.price
         self._volume += trade.size
-        self._dollar_volume += trade.dollar_volume
-        self._price_x_volume += trade.price * trade.size
+        dv = trade.price * trade.size  # compute once, reuse below
+        self._dollar_volume += dv
+        self._price_x_volume += dv
         self.tick_count += 1
 
     def to_bar(

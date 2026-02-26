@@ -34,6 +34,10 @@ class _RunBarBuilder(BarBuilder):
 
     A bar emits when max(buy_total, sell_total) >= EWMA threshold,
     decomposed as: E[T] x E[P_dominant] x E[|v|].
+
+    E[T] can be clamped to a [min, max] range to prevent the well-known
+    instability in balanced markets where the threshold either collapses
+    or explodes.  See mlfinlab's exp_num_ticks_constraints for the same fix.
     """
 
     _MIN_P_DOMINANT = 0.55
@@ -45,8 +49,12 @@ class _RunBarBuilder(BarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
         super().__init__(source, pair)
+
+        # E[T] clamping range — prevents collapse/explosion feedback loop
+        self._expected_ticks_range = expected_ticks_range
 
         # Decompose initial expected into three EWMA components
         if isinstance(initial_expected, dict):
@@ -74,6 +82,7 @@ class _RunBarBuilder(BarBuilder):
         self._sum_abs_contrib: float = 0.0
         self._prev_price: Decimal | None = None
         self._prev_sign: int = 1
+        self._cached_threshold: float | None = None
 
     # -- Threshold --------------------------------------------------------
 
@@ -82,12 +91,17 @@ class _RunBarBuilder(BarBuilder):
         """Adaptive threshold: E[T] x E[P_dominant] x E[|v|].
 
         Clamps P_dominant to [0.55, 0.95] for numerical stability.
+
+        Cached because the EWMAs only change on bar emission; avoids
+        recomputing on every trade.
         """
-        p_dom = min(
-            max(self._ewma_p_dom.expected, self._MIN_P_DOMINANT),
-            self._MAX_P_DOMINANT,
-        )
-        return self._ewma_t.expected * p_dom * self._ewma_v.expected
+        if self._cached_threshold is None:
+            p_dom = min(
+                max(self._ewma_p_dom.expected, self._MIN_P_DOMINANT),
+                self._MAX_P_DOMINANT,
+            )
+            self._cached_threshold = self._ewma_t.expected * p_dom * self._ewma_v.expected
+        return self._cached_threshold
 
     # -- Subclass contract ------------------------------------------------
 
@@ -137,6 +151,13 @@ class _RunBarBuilder(BarBuilder):
             self._ewma_p_dom.update(p_dom)
             self._ewma_v.update(avg_v)
 
+            # Clamp E[T] to prevent collapse/explosion feedback loop
+            if self._expected_ticks_range is not None:
+                lo, hi = self._expected_ticks_range
+                self._ewma_t._expected = max(lo, min(hi, self._ewma_t._expected))
+
+            self._cached_threshold = None  # invalidate — EWMAs changed
+
             metadata = self._flush_metadata()
             self._buy_total = 0.0
             self._sell_total = 0.0
@@ -149,12 +170,15 @@ class _RunBarBuilder(BarBuilder):
     # -- Metadata hooks ---------------------------------------------------
 
     def _flush_metadata(self) -> dict:
-        return {
+        meta = {
             "ewma_window": self._ewma_t.window,
             "ewma_t": self._ewma_t.expected,
             "ewma_p_dom": self._ewma_p_dom.expected,
             "ewma_v": self._ewma_v.expected,
         }
+        if self._expected_ticks_range is not None:
+            meta["expected_ticks_range"] = list(self._expected_ticks_range)
+        return meta
 
     def restore_state(self, metadata: dict) -> None:
         """Restore EWMA state from bar metadata (daemon restart).
@@ -182,6 +206,12 @@ class _RunBarBuilder(BarBuilder):
             self._ewma_p_dom = EWMAEstimator(window=window, initial_value=1.0)
             self._ewma_v = EWMAEstimator(window=window, initial_value=1.0)
 
+        if "expected_ticks_range" in metadata:
+            r = metadata["expected_ticks_range"]
+            self._expected_ticks_range = (float(r[0]), float(r[1]))
+
+        self._cached_threshold = None  # invalidate — EWMAs replaced
+
 
 # -- Concrete run builders ------------------------------------------------
 
@@ -199,8 +229,9 @@ class TickRunBarBuilder(_RunBarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
-        super().__init__(source, pair, ewma_window, initial_expected)
+        super().__init__(source, pair, ewma_window, initial_expected, expected_ticks_range)
         self._ewma_window = ewma_window
 
     @property
@@ -224,8 +255,9 @@ class VolumeRunBarBuilder(_RunBarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
-        super().__init__(source, pair, ewma_window, initial_expected)
+        super().__init__(source, pair, ewma_window, initial_expected, expected_ticks_range)
         self._ewma_window = ewma_window
 
     @property
@@ -250,8 +282,9 @@ class DollarRunBarBuilder(_RunBarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
-        super().__init__(source, pair, ewma_window, initial_expected)
+        super().__init__(source, pair, ewma_window, initial_expected, expected_ticks_range)
         self._ewma_window = ewma_window
 
     @property

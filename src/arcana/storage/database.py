@@ -528,8 +528,11 @@ class Database:
                 )
             rows = cur.fetchall()
 
+        # model_construct() skips Pydantic validation — safe here because
+        # the DB column types (TIMESTAMPTZ, NUMERIC, TEXT) already guarantee
+        # the correct Python types via psycopg's type adaptation.
         return [
-            Trade(
+            Trade.model_construct(
                 timestamp=r[0],
                 trade_id=r[1],
                 source=r[2],

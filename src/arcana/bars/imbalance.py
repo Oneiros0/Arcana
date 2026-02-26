@@ -35,6 +35,12 @@ class _ImbalanceBarBuilder(BarBuilder):
       threshold = E[T] x |E[2P-1]| x E[|v|]
     Each factor is tracked by a separate EWMA, enabling faster adaptation
     to market regime changes than a monolithic E[|theta|] tracker.
+
+    E[T] can be clamped to a [min, max] range to prevent the well-known
+    instability in balanced markets where the threshold either collapses
+    (E[T] → 1, producing 1-tick bars) or explodes (E[T] → ∞, producing
+    ever-fewer bars).  See mlfinlab's exp_num_ticks_constraints for the
+    same fix.
     """
 
     # Minimum |E[2P-1]| to prevent degenerate bars in balanced markets
@@ -46,8 +52,12 @@ class _ImbalanceBarBuilder(BarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
         super().__init__(source, pair)
+
+        # E[T] clamping range — prevents collapse/explosion feedback loop
+        self._expected_ticks_range = expected_ticks_range
 
         # Decompose initial expected into three EWMA components
         if isinstance(initial_expected, dict):
@@ -75,6 +85,7 @@ class _ImbalanceBarBuilder(BarBuilder):
         self._sum_abs_contrib: float = 0.0
         self._prev_price: Decimal | None = None
         self._prev_sign: int = 1  # default to +1 until first tick rule fires
+        self._cached_threshold: float | None = None
 
     # -- Threshold --------------------------------------------------------
 
@@ -84,9 +95,14 @@ class _ImbalanceBarBuilder(BarBuilder):
 
         Floors |E[2P-1]| at 0.1 to prevent degenerate zero-threshold
         in balanced markets (Prado's recommendation).
+
+        Cached because the EWMAs only change on bar emission; avoids
+        recomputing 3 multiplications on every trade.
         """
-        imb = max(abs(self._ewma_imb.expected), self._MIN_DIRECTIONAL_BIAS)
-        return self._ewma_t.expected * imb * self._ewma_v.expected
+        if self._cached_threshold is None:
+            imb = max(abs(self._ewma_imb.expected), self._MIN_DIRECTIONAL_BIAS)
+            self._cached_threshold = self._ewma_t.expected * imb * self._ewma_v.expected
+        return self._cached_threshold
 
     # -- Subclass contract ------------------------------------------------
 
@@ -131,6 +147,13 @@ class _ImbalanceBarBuilder(BarBuilder):
             self._ewma_imb.update(2.0 * p_buy - 1.0)
             self._ewma_v.update(self._sum_abs_contrib / bar_ticks)
 
+            # Clamp E[T] to prevent collapse/explosion feedback loop
+            if self._expected_ticks_range is not None:
+                lo, hi = self._expected_ticks_range
+                self._ewma_t._expected = max(lo, min(hi, self._ewma_t._expected))
+
+            self._cached_threshold = None  # invalidate — EWMAs changed
+
             metadata = self._flush_metadata()
             self._cum_imbalance = 0.0
             self._buy_count = 0
@@ -142,12 +165,15 @@ class _ImbalanceBarBuilder(BarBuilder):
     # -- Metadata hooks ---------------------------------------------------
 
     def _flush_metadata(self) -> dict:
-        return {
+        meta = {
             "ewma_window": self._ewma_t.window,
             "ewma_t": self._ewma_t.expected,
             "ewma_imb": self._ewma_imb.expected,
             "ewma_v": self._ewma_v.expected,
         }
+        if self._expected_ticks_range is not None:
+            meta["expected_ticks_range"] = list(self._expected_ticks_range)
+        return meta
 
     def restore_state(self, metadata: dict) -> None:
         """Restore EWMA state from bar metadata (daemon restart).
@@ -175,6 +201,12 @@ class _ImbalanceBarBuilder(BarBuilder):
             self._ewma_imb = EWMAEstimator(window=window, initial_value=1.0)
             self._ewma_v = EWMAEstimator(window=window, initial_value=1.0)
 
+        if "expected_ticks_range" in metadata:
+            r = metadata["expected_ticks_range"]
+            self._expected_ticks_range = (float(r[0]), float(r[1]))
+
+        self._cached_threshold = None  # invalidate — EWMAs replaced
+
 
 # -- Concrete imbalance builders ------------------------------------------
 
@@ -192,8 +224,9 @@ class TickImbalanceBarBuilder(_ImbalanceBarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
-        super().__init__(source, pair, ewma_window, initial_expected)
+        super().__init__(source, pair, ewma_window, initial_expected, expected_ticks_range)
         self._ewma_window = ewma_window
 
     @property
@@ -217,8 +250,9 @@ class VolumeImbalanceBarBuilder(_ImbalanceBarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
-        super().__init__(source, pair, ewma_window, initial_expected)
+        super().__init__(source, pair, ewma_window, initial_expected, expected_ticks_range)
         self._ewma_window = ewma_window
 
     @property
@@ -243,8 +277,9 @@ class DollarImbalanceBarBuilder(_ImbalanceBarBuilder):
         pair: str,
         ewma_window: int,
         initial_expected: dict | float | None = None,
+        expected_ticks_range: tuple[float, float] | None = None,
     ) -> None:
-        super().__init__(source, pair, ewma_window, initial_expected)
+        super().__init__(source, pair, ewma_window, initial_expected, expected_ticks_range)
         self._ewma_window = ewma_window
 
     @property
