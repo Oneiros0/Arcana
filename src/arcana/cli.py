@@ -383,9 +383,12 @@ def _parse_bar_spec(
             )
 
         # Extract E[T] clamping range: explicit config > auto-derived from calibration
+        # Always pop from e0 so the key doesn't leak into EWMA init
         et_range = expected_ticks_constraints
-        if et_range is None and isinstance(e0, dict) and "expected_ticks_range" in e0:
-            et_range = tuple(e0.pop("expected_ticks_range"))
+        if isinstance(e0, dict) and "expected_ticks_range" in e0:
+            auto_range = tuple(e0.pop("expected_ticks_range"))
+            if et_range is None:
+                et_range = auto_range
 
         builder_map = {
             "tib": TickImbalanceBarBuilder,

@@ -201,7 +201,7 @@ class _ImbalanceBarBuilder(BarBuilder):
             self._ewma_imb = EWMAEstimator(window=window, initial_value=1.0)
             self._ewma_v = EWMAEstimator(window=window, initial_value=1.0)
 
-        if "expected_ticks_range" in metadata:
+        if "expected_ticks_range" in metadata and self._expected_ticks_range is None:
             r = metadata["expected_ticks_range"]
             self._expected_ticks_range = (float(r[0]), float(r[1]))
 
