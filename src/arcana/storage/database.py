@@ -13,7 +13,7 @@ from arcana.config import DatabaseConfig
 from arcana.ingestion.models import Trade
 
 if TYPE_CHECKING:
-    from arcana.bars.base import Bar
+    from arcana.models import Bar
 
 logger = logging.getLogger(__name__)
 

@@ -28,22 +28,11 @@ class DatabaseConfig(BaseModel):
         return f"postgresql://{self.user}{pw}@{self.host}:{self.port}/{self.database}"
 
 
-class BarSpecConfig(BaseModel):
-    """Configuration for a single bar type."""
-
-    spec: str
-    enabled: bool = True
-    bars_per_day: int | None = None
-    initial_expected: float | None = None
-    expected_ticks_constraints: list[float] | None = None
-
-
 class PipelineConfig(BaseModel):
     """Pipeline-wide settings."""
 
     pair: str = "ETH-USD"
     source: str = "coinbase"
-    bars_per_day: int = 50
 
 
 class ArcanaConfig(BaseModel):
@@ -51,7 +40,6 @@ class ArcanaConfig(BaseModel):
 
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
-    bars: list[BarSpecConfig] = Field(default_factory=list)
 
     @classmethod
     def from_toml(cls, path: Path | str) -> ArcanaConfig:

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Arcana Overnight Ingestion Script.
+"""Arcana + Sigil Overnight Ingestion Script.
 
-Backfills ETH-USD from 6 months ago to present, then starts the daemon.
+Backfills ETH-USD from 6 months ago to present, builds bars, then starts
+the ingestion daemon. Uses arcana for trade ingestion and sigil for bar
+construction.
+
 Designed to run unattended overnight with:
   - Auto-resume on crash (month-by-month chunks)
   - Full logging to timestamped file
@@ -69,10 +72,9 @@ def log_section(title: str) -> None:
     log("=" * 70)
 
 
-def run_arcana(*args: str, timeout: int = 7200) -> tuple[int, str]:
-    """Run arcana CLI with DB env vars, return (exit_code, output)."""
+def _run_cmd(cmd: list[str], timeout: int = 7200) -> tuple[int, str]:
+    """Run a CLI command with DB env vars, return (exit_code, output)."""
     env = {**os.environ, **DB_ENV}
-    cmd = ["arcana", "--log-level", "INFO"] + list(args)
     log(f"  $ {' '.join(cmd)}")
 
     try:
@@ -91,6 +93,16 @@ def run_arcana(*args: str, timeout: int = 7200) -> tuple[int, str]:
         return result.returncode, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
         return -1, f"TIMEOUT after {timeout}s"
+
+
+def run_arcana(*args: str, timeout: int = 7200) -> tuple[int, str]:
+    """Run arcana CLI with DB env vars."""
+    return _run_cmd(["arcana", "--log-level", "INFO"] + list(args), timeout=timeout)
+
+
+def run_sigil(*args: str, timeout: int = 7200) -> tuple[int, str]:
+    """Run sigil CLI with DB env vars."""
+    return _run_cmd(["sigil", "--log-level", "INFO"] + list(args), timeout=timeout)
 
 
 def psql(query: str) -> str:
@@ -291,16 +303,16 @@ def main() -> int:
         log("")
 
     # ── 3. Build bar types from config ───────────────────────────────
-    # Load bar specs from arcana.toml (auto-calibrated thresholds)
+    # Load bar specs from sigil.toml (auto-calibrated thresholds)
     try:
-        from arcana.config import ArcanaConfig
+        from sigil.config import SigilConfig
 
-        cfg = ArcanaConfig.find_and_load()
+        sigil_cfg = SigilConfig.find_and_load()
     except Exception:
-        cfg = None
+        sigil_cfg = None
 
-    if cfg and cfg.bars:
-        bar_specs = [b.spec for b in cfg.bars if b.enabled]
+    if sigil_cfg and sigil_cfg.bars:
+        bar_specs = [b.spec for b in sigil_cfg.bars if b.enabled]
     else:
         # Fallback: auto-calibrated defaults
         bar_specs = [
@@ -324,7 +336,7 @@ def main() -> int:
         t0 = time.time()
 
         for attempt in range(1, MAX_RETRIES + 1):
-            rc, out = run_arcana("bars", "build", spec, PAIR, timeout=7200)
+            rc, out = run_sigil("build", spec, PAIR, timeout=7200)
             if rc == 0:
                 break
             log(f"  Attempt {attempt} failed for {spec}")
@@ -353,7 +365,7 @@ def main() -> int:
             except Exception:
                 log(f"  {spec}: completed in {elapsed:.0f}s (could not count bars)")
         else:
-            record_failure(f"bars build {spec}", f"exit {rc}")
+            record_failure(f"sigil build {spec}", f"exit {rc}")
             log(f"  {spec}: FAILED after {MAX_RETRIES} attempts")
 
     # ── 4. Start daemon ───────────────────────────────────────────────
