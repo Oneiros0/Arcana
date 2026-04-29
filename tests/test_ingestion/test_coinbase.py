@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from arcana.ingestion.coinbase import DEFAULT_LIMIT, CoinbaseSource
 
@@ -306,3 +307,116 @@ class TestFetchAllTrades:
 
         for i in range(1, len(trades)):
             assert trades[i].timestamp >= trades[i - 1].timestamp
+
+
+def _make_raw_candles(
+    count: int, start_unix: int = 1700000000, granularity_s: int = 60
+) -> list[dict]:
+    """Generate raw API-format candle dicts (newest-first, like Coinbase)."""
+    return [
+        {
+            "start": str(start_unix + i * granularity_s),
+            "open": "100.0",
+            "high": "110.0",
+            "low": "90.0",
+            "close": "105.0",
+            "volume": "1.0",
+        }
+        for i in range(count - 1, -1, -1)
+    ]
+
+
+class TestFetchCandles:
+    def test_single_window_passes_granularity_param(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response({"candles": _make_raw_candles(5)})
+
+        start = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 0, 5, 0, tzinfo=UTC)
+        source.fetch_candles("ETH-USD", start=start, end=end, granularity="1m")
+
+        call = source._client.get.call_args
+        params = call.kwargs.get("params") or call[1].get("params")
+        assert params["granularity"] == "ONE_MINUTE"
+        assert params["start"] == str(int(start.timestamp()))
+        assert params["end"] == str(int(end.timestamp()))
+
+    def test_returns_sorted_ascending(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        # API returns newest-first; our parser must sort ascending
+        source._client.get.return_value = _mock_response({"candles": _make_raw_candles(10)})
+
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 0, 10, 0, tzinfo=UTC)
+        candles = source.fetch_candles("ETH-USD", start=start, end=end)
+
+        for i in range(1, len(candles)):
+            assert candles[i].start >= candles[i - 1].start
+
+    def test_empty_response(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response({"candles": []})
+
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 0, 1, 0, tzinfo=UTC)
+        assert source.fetch_candles("ETH-USD", start=start, end=end) == []
+
+    def test_unknown_granularity_rejected(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        with pytest.raises(ValueError, match="Unknown granularity"):
+            source.fetch_candles(
+                "ETH-USD",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 1, 1, tzinfo=UTC),
+                granularity="3m",
+            )
+
+
+class TestFetchAllCandles:
+    @patch("arcana.ingestion.coinbase.time_mod.sleep")
+    def test_walks_forward_in_chunks_of_350(self, mock_sleep):
+        """700 minutes of 1m candles requires 2 forward chunks of 350."""
+        source = CoinbaseSource()
+        source._client = MagicMock()
+
+        chunk1 = _make_raw_candles(350, start_unix=1700000000)
+        chunk2 = _make_raw_candles(350, start_unix=1700000000 + 350 * 60)
+        source._client.get.side_effect = [
+            _mock_response({"candles": chunk1}),
+            _mock_response({"candles": chunk2}),
+        ]
+
+        start = datetime.fromtimestamp(1700000000, tz=UTC)
+        end = datetime.fromtimestamp(1700000000 + 700 * 60, tz=UTC)
+        candles = source.fetch_all_candles("ETH-USD", start, end, granularity="1m")
+
+        assert source._client.get.call_count == 2
+        assert len(candles) == 700
+        for i in range(1, len(candles)):
+            assert candles[i].start >= candles[i - 1].start
+
+    @patch("arcana.ingestion.coinbase.time_mod.sleep")
+    def test_dedups_overlap_at_chunk_boundary(self, mock_sleep):
+        """If chunks overlap by one bucket, the dup must not appear twice."""
+        source = CoinbaseSource()
+        source._client = MagicMock()
+
+        # chunk1 ends at t=349*60; chunk2 starts at the same bucket → overlap of 1
+        chunk1 = _make_raw_candles(350, start_unix=1700000000)
+        chunk2 = _make_raw_candles(10, start_unix=1700000000 + 349 * 60)
+        source._client.get.side_effect = [
+            _mock_response({"candles": chunk1}),
+            _mock_response({"candles": chunk2}),
+        ]
+
+        start = datetime.fromtimestamp(1700000000, tz=UTC)
+        end = datetime.fromtimestamp(1700000000 + 360 * 60, tz=UTC)
+        candles = source.fetch_all_candles("ETH-USD", start, end, granularity="1m")
+
+        # Unique by start time
+        starts = {c.start for c in candles}
+        assert len(starts) == len(candles)

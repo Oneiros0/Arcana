@@ -13,12 +13,18 @@ Key advantages over the Exchange API:
 import logging
 import os
 import time as time_mod
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 
 from arcana.ingestion.base import DataSource
+from arcana.ingestion.candles import (
+    Candle,
+    granularity_api_value,
+    granularity_seconds,
+    parse_coinbase_candle,
+)
 from arcana.ingestion.models import Trade
 
 logger = logging.getLogger(__name__)
@@ -26,6 +32,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.coinbase.com"
 API_PREFIX = "/api/v3/brokerage/market"
 DEFAULT_LIMIT = 1000  # API accepts up to 1000; 2500+ returns 500 errors
+CANDLE_LIMIT = 350  # Hard cap from the /candles endpoint
 RATE_LIMIT_DELAY = 0.12  # ~8 req/s with margin (limit is 10)
 MAX_RETRIES = 4
 RETRY_BACKOFF = [2, 4, 8, 16]
@@ -198,6 +205,66 @@ class CoinbaseSource(DataSource):
             )
 
         return sorted(all_trades, key=lambda t: t.timestamp)
+
+    def fetch_candles(
+        self,
+        pair: str,
+        start: datetime,
+        end: datetime,
+        granularity: str = "1m",
+    ) -> list[Candle]:
+        """Fetch OHLCV candles for a single window (one API call).
+
+        Coinbase caps a single response at 350 candles, so the caller MUST
+        ensure ``end - start`` covers at most 350 buckets at the requested
+        granularity. ``fetch_all_candles`` handles pagination.
+        """
+        endpoint = f"{API_PREFIX}/products/{pair}/candles"
+        params = {
+            "start": str(int(start.timestamp())),
+            "end": str(int(end.timestamp())),
+            "granularity": granularity_api_value(granularity),
+        }
+        response = self._request_with_retry(endpoint, params)
+        raw_candles = response.json().get("candles", [])
+        candles = [
+            parse_coinbase_candle(raw, pair=pair, granularity=granularity, source=self.name)
+            for raw in raw_candles
+        ]
+        return sorted(candles, key=lambda c: c.start)
+
+    def fetch_all_candles(
+        self,
+        pair: str,
+        start: datetime,
+        end: datetime,
+        granularity: str = "1m",
+    ) -> list[Candle]:
+        """Fetch ALL candles in a window, walking forward in chunks of 350.
+
+        Each chunk covers ``CANDLE_LIMIT * granularity_seconds`` of wall time,
+        i.e. 350 buckets. Steps forward by exactly that span each call so no
+        bucket is fetched twice.
+        """
+        bucket_seconds = granularity_seconds(granularity)
+        chunk = timedelta(seconds=CANDLE_LIMIT * bucket_seconds)
+        all_candles: list[Candle] = []
+        seen_starts: set[int] = set()
+        current = start
+        while current < end:
+            chunk_end = min(current + chunk, end)
+            candles = self.fetch_candles(
+                pair=pair, start=current, end=chunk_end, granularity=granularity
+            )
+            for c in candles:
+                key = int(c.start.timestamp())
+                if key not in seen_starts:
+                    seen_starts.add(key)
+                    all_candles.append(c)
+            current = chunk_end
+            if current < end:
+                time_mod.sleep(self._rate_delay)
+        return sorted(all_candles, key=lambda c: c.start)
 
     def get_supported_pairs(self) -> list[str]:
         """Fetch all available trading pairs from Coinbase."""

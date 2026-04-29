@@ -12,6 +12,8 @@ import time as time_mod
 from datetime import UTC, datetime, timedelta
 
 from arcana.ingestion.base import DataSource
+from arcana.ingestion.candles import candle_to_trade, granularity_seconds
+from arcana.ingestion.coinbase import CANDLE_LIMIT, CoinbaseSource
 from arcana.ingestion.models import Trade
 from arcana.storage.database import Database
 
@@ -149,6 +151,145 @@ def ingest_backfill(
     elapsed = time_mod.time() - start_time
     logger.info(
         "Backfill complete: %d trades inserted in %s",
+        total_inserted,
+        _format_eta(elapsed),
+    )
+    return total_inserted
+
+
+def backfill_candles(
+    source: CoinbaseSource,
+    db: Database,
+    pair: str,
+    since: datetime,
+    until: datetime | None = None,
+    granularity: str = "1m",
+) -> int:
+    """One-shot historical candle backfill (REST, not websocket).
+
+    Walks forward in chunks of 350 candles per API call, synthesizes one
+    Trade per candle (price=HLC/3, side='unknown', data_quality='candle_<g>'),
+    and inserts into raw_trades alongside any tick data. The data_quality
+    tag is the boundary marker — bars built across tick/candle rows are NOT
+    comparable, and downstream consumers must filter or split on this field.
+
+    Resume logic uses ``data_quality='candle_<g>'`` so prior tick rows in the
+    same range don't suppress backfilling.
+
+    Args:
+        source: Coinbase REST source. (Candle endpoint is Coinbase-specific
+            for now; the abstract DataSource doesn't define it.)
+        db: Database to store synthesized trades in.
+        pair: Trading pair, e.g. 'ETH-USD'.
+        since: Start of historical range (UTC).
+        until: End of historical range (UTC). Defaults to now.
+        granularity: Candle bucket size — '1m', '5m', '15m', '30m', '1h',
+            '2h', '6h', or '1d'. Default '1m' minimizes information loss.
+
+    Returns:
+        Total number of synthesized trades actually inserted.
+    """
+    shutdown = GracefulShutdown()
+    end = until or datetime.now(UTC)
+    quality_tag = f"candle_{granularity}"
+
+    # Resume from the last candle-derived row in the requested range.
+    last_ts = db.get_last_timestamp(
+        pair, source.name, before=end, data_quality=quality_tag
+    )
+    if last_ts and last_ts > since:
+        logger.info(
+            "Resuming candle backfill from %s (existing %s data)",
+            last_ts.isoformat(),
+            quality_tag,
+        )
+        # Step forward one bucket so we don't refetch the last candle.
+        bucket = timedelta(seconds=granularity_seconds(granularity))
+        since = last_ts + bucket
+
+    if since >= end:
+        logger.info("Candle backfill range already covered for %s %s", pair, quality_tag)
+        return 0
+
+    bucket_seconds = granularity_seconds(granularity)
+    window = timedelta(seconds=CANDLE_LIMIT * bucket_seconds)
+    total_buckets = max(1, int((end - since).total_seconds() // bucket_seconds))
+    total_inserted = 0
+    batch_buffer: list[Trade] = []
+    current = since
+    chunk_num = 0
+    start_time = time_mod.time()
+
+    logger.info(
+        "Starting candle backfill: %s %s @ %s from %s to %s (~%d buckets)",
+        source.name,
+        pair,
+        granularity,
+        since.strftime("%Y-%m-%d %H:%M"),
+        end.strftime("%Y-%m-%d %H:%M"),
+        total_buckets,
+    )
+    logger.warning(
+        "Candle data is NOT tick-equivalent. Rows tagged data_quality=%r. "
+        "Do NOT build tick/imbalance/run bars across tick→candle boundaries.",
+        quality_tag,
+    )
+
+    while current < end:
+        if shutdown.should_stop:
+            logger.info("Shutdown requested — committing remaining buffer...")
+            if batch_buffer:
+                total_inserted += db.insert_trades(batch_buffer)
+                batch_buffer.clear()
+            break
+
+        chunk_end = min(current + window, end)
+        chunk_num += 1
+
+        try:
+            candles = source.fetch_candles(
+                pair=pair, start=current, end=chunk_end, granularity=granularity
+            )
+        except Exception:
+            logger.exception(
+                "Failed to fetch candle chunk %d (%s → %s). Halting backfill.",
+                chunk_num,
+                current.isoformat(),
+                chunk_end.isoformat(),
+            )
+            if batch_buffer:
+                total_inserted += db.insert_trades(batch_buffer)
+            raise
+
+        batch_buffer.extend(candle_to_trade(c) for c in candles)
+
+        if len(batch_buffer) >= BATCH_SIZE:
+            inserted = db.insert_trades(batch_buffer)
+            total_inserted += inserted
+            batch_buffer.clear()
+
+        elapsed = time_mod.time() - start_time
+        rate = total_inserted / elapsed if elapsed > 0 else 0
+        logger.info(
+            "Chunk %d | %s → %s | %d candles | Total: %d stored | %.1f rows/sec",
+            chunk_num,
+            current.strftime("%Y-%m-%d %H:%M"),
+            chunk_end.strftime("%Y-%m-%d %H:%M"),
+            len(candles),
+            total_inserted + len(batch_buffer),
+            rate,
+        )
+
+        current = chunk_end
+        rate_delay = float(os.environ.get("ARCANA_RATE_DELAY", 0.12))
+        time_mod.sleep(rate_delay)
+
+    if batch_buffer:
+        total_inserted += db.insert_trades(batch_buffer)
+
+    elapsed = time_mod.time() - start_time
+    logger.info(
+        "Candle backfill complete: %d synthesized trades inserted in %s",
         total_inserted,
         _format_eta(elapsed),
     )

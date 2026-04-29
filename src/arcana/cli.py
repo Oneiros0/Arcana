@@ -10,9 +10,11 @@ from datetime import UTC, datetime
 import click
 
 from arcana.config import ArcanaConfig, DatabaseConfig
+from arcana.ingestion.candles import GRANULARITY_MAP
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.pipeline import (
     DAEMON_INTERVAL,
+    backfill_candles,
     ingest_backfill,
     run_daemon,
 )
@@ -186,6 +188,91 @@ def ingest(
         total = ingest_backfill(source, db_conn, pair, since=since_utc, until=until_utc)
 
     click.echo(f"Done. {total} new trades ingested.")
+
+
+# --- Historical candle backfill ---
+
+
+@cli.command("backfill-candles")
+@click.argument("pair")
+@click.option(
+    "--since",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
+    help="Start date for candle backfill (e.g. 2024-01-01).",
+)
+@click.option(
+    "--until",
+    default=None,
+    type=click.DateTime(formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
+    help="End date for candle backfill (default: now).",
+)
+@click.option(
+    "--granularity",
+    default="1m",
+    type=click.Choice(sorted(GRANULARITY_MAP), case_sensitive=False),
+    help="Candle bucket size (default: 1m).",
+)
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
+@click.pass_context
+def backfill_candles_cmd(
+    ctx: click.Context,
+    pair: str,
+    since: datetime,
+    until: datetime | None,
+    granularity: str,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+) -> None:
+    """One-shot historical candle backfill via Coinbase REST.
+
+    Coinbase's tick-level history is bounded — for older windows only OHLCV
+    candles are available. Each candle becomes one synthesized trade tagged
+    data_quality='candle_<granularity>' so it is distinguishable from real
+    tick rows. Bars built across the tick/candle boundary are NOT comparable;
+    downstream consumers must filter or split on data_quality.
+
+    Resumes automatically. Separate from the daemon — exits when done.
+
+    \b
+    Examples:
+      arcana backfill-candles ETH-USD --since 2023-01-01 --until 2024-01-01
+      arcana backfill-candles BTC-USD --since 2024-06-01 --granularity 5m
+    """
+    since_utc = since.replace(tzinfo=UTC)
+    until_utc = until.replace(tzinfo=UTC) if until else None
+    arcana_cfg = ctx.obj.get("config") if ctx.obj else None
+    cfg_db = arcana_cfg.database if arcana_cfg else None
+    config = _db_config_from_options(host, port, database, user, password, cfg_db=cfg_db)
+
+    end_label = until_utc.date() if until_utc else "now"
+    click.echo(
+        f"Backfilling {pair} candles ({granularity}) from {since_utc.date()} to {end_label}..."
+    )
+    click.echo(
+        "  Note: candle-derived rows are tagged data_quality="
+        f"'candle_{granularity}'. They are NOT tick-equivalent."
+    )
+
+    with CoinbaseSource() as source, Database(config) as db_conn:
+        db_conn.init_schema()
+        total = backfill_candles(
+            source,
+            db_conn,
+            pair,
+            since=since_utc,
+            until=until_utc,
+            granularity=granularity,
+        )
+
+    click.echo(f"Done. {total} synthesized trades inserted.")
 
 
 # --- Daemon command ---

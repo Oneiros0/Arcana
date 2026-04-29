@@ -28,11 +28,22 @@ CREATE TABLE IF NOT EXISTS raw_trades (
     price        NUMERIC       NOT NULL,
     size         NUMERIC       NOT NULL,
     side         TEXT          NOT NULL,
+    data_quality TEXT          NOT NULL DEFAULT 'tick',
     UNIQUE (source, trade_id, timestamp)
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_trades_pair_ts
     ON raw_trades (pair, timestamp);
+CREATE INDEX IF NOT EXISTS idx_raw_trades_quality
+    ON raw_trades (pair, data_quality, timestamp);
+"""
+
+# Idempotent migration for databases initialized before data_quality existed.
+RAW_TRADES_MIGRATIONS = """
+ALTER TABLE raw_trades
+    ADD COLUMN IF NOT EXISTS data_quality TEXT NOT NULL DEFAULT 'tick';
+CREATE INDEX IF NOT EXISTS idx_raw_trades_quality
+    ON raw_trades (pair, data_quality, timestamp);
 """
 
 HYPERTABLE_RAW = """
@@ -40,8 +51,8 @@ SELECT create_hypertable('raw_trades', 'timestamp', if_not_exists => TRUE);
 """
 
 UPSERT_TRADES = """
-INSERT INTO raw_trades (timestamp, trade_id, source, pair, price, size, side)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+INSERT INTO raw_trades (timestamp, trade_id, source, pair, price, size, side, data_quality)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (source, trade_id, timestamp) DO NOTHING;
 """
 
@@ -73,6 +84,37 @@ def _bar_table_name(bar_type: str, pair: str) -> str:
 
     pair_norm = pair.lower().replace("-", "_")
     return f"bars_{bar_type.replace('.', '_')}_{pair_norm}"
+
+
+def _parse_bar_table_name(table_name: str) -> tuple[str, str] | None:
+    """Parse a bar table name back into (bar_type, pair).
+
+    The pair is always the last two underscore-separated tokens joined
+    by a hyphen and uppercased.  Everything between the ``bars_`` prefix
+    and the pair suffix is the bar_type.
+
+    Examples:
+        'bars_tick_9243_eth_usd'  -> ('tick_9243', 'ETH-USD')
+        'bars_tib_20_eth_usd'    -> ('tib_20', 'ETH-USD')
+        'bars_volume_3000_btc_usd' -> ('volume_3000', 'BTC-USD')
+
+    Returns None if the table name doesn't follow the expected format.
+    """
+    if not table_name.startswith("bars_"):
+        return None
+
+    parts = table_name[5:].split("_")  # strip 'bars_' prefix
+    if len(parts) < 3:
+        return None
+
+    # Last two tokens form the pair (e.g., 'eth', 'usd' -> 'ETH-USD')
+    pair = f"{parts[-2]}-{parts[-1]}".upper()
+    # Everything before the pair tokens is the bar_type
+    bar_type = "_".join(parts[:-2])
+    if not bar_type:
+        return None
+
+    return (bar_type, pair)
 
 
 def _bar_table_schema(table_name: str) -> str:
@@ -156,6 +198,10 @@ class Database:
                 # Re-create tables since rollback undid them
                 with conn.cursor() as cur2:
                     cur2.execute(RAW_TRADES_SCHEMA)
+        conn.commit()
+        # Apply forward-only migrations for pre-existing databases.
+        with conn.cursor() as cur:
+            cur.execute(RAW_TRADES_MIGRATIONS)
         conn.commit()
         logger.info("Database schema initialized")
 
@@ -257,6 +303,7 @@ class Database:
                         t.price,
                         t.size,
                         t.side,
+                        t.data_quality,
                     )
                     for t in trades
                 ],
@@ -275,13 +322,20 @@ class Database:
             return row[0] if row else 0
 
     def get_last_timestamp(
-        self, pair: str, source: str = "coinbase", before: datetime | None = None
+        self,
+        pair: str,
+        source: str = "coinbase",
+        before: datetime | None = None,
+        data_quality: str | None = None,
     ) -> datetime | None:
         """Get the most recent trade timestamp for a pair.
 
         Used by the daemon and backfill to know where to resume.
         When *before* is set, only considers trades at or before that
         timestamp — useful for bounded backfill ranges.
+        When *data_quality* is set, restricts to rows with that exact tag
+        (e.g. 'tick' or 'candle_1m') — used by the candle backfill so its
+        resume point is not contaminated by tick rows.
         """
         conn = self.connect()
         with conn.cursor() as cur:
@@ -290,6 +344,9 @@ class Database:
             if before is not None:
                 query += " AND timestamp <= %s"
                 params.append(before)
+            if data_quality is not None:
+                query += " AND data_quality = %s"
+                params.append(data_quality)
             cur.execute(query, params)
             row = cur.fetchone()
             return row[0] if row and row[0] else None
@@ -485,6 +542,86 @@ class Database:
                 return row[0] if isinstance(row[0], dict) else json.loads(row[0])
             return None
 
+    # ── Bar queries ────────────────────────────────────────────────────────
+
+    def get_bars(
+        self,
+        bar_type: str,
+        pair: str,
+        source: str = "coinbase",
+        since: datetime | None = None,
+        limit: int = 10_000,
+    ) -> list[Bar]:
+        """Fetch bars from a per-type table, ordered by time_start.
+
+        Args:
+            bar_type: Bar type label, e.g. 'tick_9243'.
+            pair: Trading pair, e.g. 'ETH-USD'.
+            source: Data source name.
+            since: If provided, only fetch bars with time_start > since.
+            limit: Maximum number of bars to return.
+
+        Returns:
+            List of Bar objects, empty if the table doesn't exist.
+        """
+        import json as _json
+
+        table_name = _bar_table_name(bar_type, pair)
+        if not self._table_exists(table_name):
+            return []
+
+        conn = self.connect()
+        with conn.cursor() as cur:
+            if since is not None:
+                cur.execute(
+                    f"SELECT time_start, time_end, source, pair, "
+                    f"open, high, low, close, vwap, volume, dollar_volume, "
+                    f"tick_count, time_span, metadata "
+                    f"FROM {table_name} "
+                    f"WHERE pair = %s AND source = %s AND time_start > %s "
+                    f"ORDER BY time_start ASC LIMIT %s",
+                    (pair, source, since, limit),
+                )
+            else:
+                cur.execute(
+                    f"SELECT time_start, time_end, source, pair, "
+                    f"open, high, low, close, vwap, volume, dollar_volume, "
+                    f"tick_count, time_span, metadata "
+                    f"FROM {table_name} "
+                    f"WHERE pair = %s AND source = %s "
+                    f"ORDER BY time_start ASC LIMIT %s",
+                    (pair, source, limit),
+                )
+            rows = cur.fetchall()
+
+        from arcana.models import Bar
+
+        bars: list[Bar] = []
+        for r in rows:
+            meta = r[13]
+            if meta is not None and not isinstance(meta, dict):
+                meta = _json.loads(meta)
+            bars.append(
+                Bar.model_construct(
+                    time_start=r[0],
+                    time_end=r[1],
+                    bar_type=bar_type,
+                    source=r[2],
+                    pair=r[3],
+                    open=r[4],
+                    high=r[5],
+                    low=r[6],
+                    close=r[7],
+                    vwap=r[8],
+                    volume=r[9],
+                    dollar_volume=r[10],
+                    tick_count=r[11],
+                    time_span=r[12],
+                    metadata=meta,
+                )
+            )
+        return bars
+
     # ── Trade queries ─────────────────────────────────────────────────────
 
     def get_trades_since(
@@ -511,7 +648,7 @@ class Database:
             if since_trade_id is not None:
                 # Composite cursor: everything strictly after (timestamp, trade_id)
                 cur.execute(
-                    "SELECT timestamp, trade_id, source, pair, price, size, side "
+                    "SELECT timestamp, trade_id, source, pair, price, size, side, data_quality "
                     "FROM raw_trades "
                     "WHERE pair = %s AND source = %s "
                     "  AND (timestamp, trade_id) > (%s, %s) "
@@ -520,7 +657,7 @@ class Database:
                 )
             else:
                 cur.execute(
-                    "SELECT timestamp, trade_id, source, pair, price, size, side "
+                    "SELECT timestamp, trade_id, source, pair, price, size, side, data_quality "
                     "FROM raw_trades "
                     "WHERE pair = %s AND source = %s AND timestamp > %s "
                     "ORDER BY timestamp ASC, trade_id ASC LIMIT %s",
@@ -540,6 +677,7 @@ class Database:
                 price=r[4],
                 size=r[5],
                 side=r[6],
+                data_quality=r[7],
             )
             for r in rows
         ]

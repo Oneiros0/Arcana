@@ -20,6 +20,15 @@ class Trade(BaseModel):
     price: Decimal = Field(description="Execution price in quote currency")
     size: Decimal = Field(description="Execution size in base currency")
     side: str = Field(description="Taker side: 'buy', 'sell', or 'unknown'")
+    data_quality: str = Field(
+        default="tick",
+        description=(
+            "Provenance tag. 'tick' = real exchange-reported trade. "
+            "'candle_<gran>' = synthesized from an OHLCV candle (e.g. 'candle_1m'). "
+            "Bars built across data_quality boundaries are NOT comparable — "
+            "downstream consumers must split or filter on this field."
+        ),
+    )
 
     @property
     def dollar_volume(self) -> Decimal:

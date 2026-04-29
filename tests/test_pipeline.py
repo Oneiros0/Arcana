@@ -7,10 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from arcana.ingestion.candles import Candle
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.ingestion.models import Trade
 from arcana.pipeline import (
     _format_eta,
+    backfill_candles,
     ingest_backfill,
     run_daemon,
 )
@@ -201,3 +203,115 @@ class TestFormatEta:
 
     def test_hours(self):
         assert _format_eta(7500) == "2h 5m"
+
+
+def _make_candles(
+    count: int, start_ts: datetime | None = None, granularity: str = "1m"
+) -> list[Candle]:
+    """Generate a list of fake candles for testing."""
+    base = start_ts or datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+    bucket = timedelta(minutes=1)
+    return [
+        Candle(
+            start=base + bucket * i,
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("90"),
+            close=Decimal("105"),
+            volume=Decimal("1.0"),
+            granularity=granularity,
+            pair="ETH-USD",
+            source="coinbase",
+        )
+        for i in range(count)
+    ]
+
+
+class TestBackfillCandles:
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
+    def test_synthesizes_and_inserts_with_quality_tag(self, mock_sleep, mock_shutdown):
+        mock_shutdown.return_value.should_stop = False
+        candles = _make_candles(5)
+
+        source = MagicMock(spec=CoinbaseSource)
+        source.name = "coinbase"
+        source.fetch_candles.return_value = candles
+
+        db = MagicMock()
+        db.get_last_timestamp.return_value = None
+        db.insert_trades.side_effect = lambda batch: len(batch)
+
+        since = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+        until = datetime(2024, 1, 1, 0, 5, 0, tzinfo=UTC)
+        total = backfill_candles(source, db, "ETH-USD", since=since, until=until, granularity="1m")
+
+        assert total == 5
+        # Inserted trades all carry the candle_1m tag
+        inserted = db.insert_trades.call_args[0][0]
+        assert all(t.data_quality == "candle_1m" for t in inserted)
+        assert all(t.side == "unknown" for t in inserted)
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
+    def test_resume_filters_by_data_quality(self, mock_sleep, mock_shutdown):
+        """Resume must only consider candle rows, not tick rows in the same range."""
+        mock_shutdown.return_value.should_stop = False
+
+        source = MagicMock(spec=CoinbaseSource)
+        source.name = "coinbase"
+        source.fetch_candles.return_value = []
+
+        db = MagicMock()
+        db.get_last_timestamp.return_value = None
+        db.insert_trades.return_value = 0
+
+        since = datetime(2024, 1, 1, tzinfo=UTC)
+        until = datetime(2024, 1, 1, 0, 30, 0, tzinfo=UTC)
+        backfill_candles(source, db, "ETH-USD", since=since, until=until, granularity="1m")
+
+        db.get_last_timestamp.assert_called_once_with(
+            "ETH-USD", "coinbase", before=until, data_quality="candle_1m"
+        )
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
+    def test_resume_advances_past_last_candle(self, mock_sleep, mock_shutdown):
+        """Resume from last_ts + one bucket so we don't refetch the boundary candle."""
+        mock_shutdown.return_value.should_stop = False
+
+        source = MagicMock(spec=CoinbaseSource)
+        source.name = "coinbase"
+        source.fetch_candles.return_value = []
+
+        last = datetime(2024, 1, 1, 0, 10, 0, tzinfo=UTC)
+        db = MagicMock()
+        db.get_last_timestamp.return_value = last
+        db.insert_trades.return_value = 0
+
+        since = datetime(2024, 1, 1, tzinfo=UTC)
+        until = datetime(2024, 1, 1, 0, 30, 0, tzinfo=UTC)
+        backfill_candles(source, db, "ETH-USD", since=since, until=until, granularity="1m")
+
+        first_call = source.fetch_candles.call_args_list[0]
+        # First fetch should start one minute past `last`, not at `last`
+        assert first_call.kwargs["start"] == last + timedelta(minutes=1)
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
+    def test_no_op_when_range_already_covered(self, mock_sleep, mock_shutdown):
+        mock_shutdown.return_value.should_stop = False
+
+        source = MagicMock(spec=CoinbaseSource)
+        source.name = "coinbase"
+
+        db = MagicMock()
+        # Simulate prior backfill already reached the requested end
+        db.get_last_timestamp.return_value = datetime(2024, 1, 1, 0, 30, 0, tzinfo=UTC)
+
+        since = datetime(2024, 1, 1, tzinfo=UTC)
+        until = datetime(2024, 1, 1, 0, 30, 0, tzinfo=UTC)
+        total = backfill_candles(source, db, "ETH-USD", since=since, until=until, granularity="1m")
+
+        assert total == 0
+        source.fetch_candles.assert_not_called()
