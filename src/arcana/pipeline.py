@@ -194,9 +194,7 @@ def backfill_candles(
     quality_tag = f"candle_{granularity}"
 
     # Resume from the last candle-derived row in the requested range.
-    last_ts = db.get_last_timestamp(
-        pair, source.name, before=end, data_quality=quality_tag
-    )
+    last_ts = db.get_last_timestamp(pair, source.name, before=end, data_quality=quality_tag)
     if last_ts and last_ts > since:
         logger.info(
             "Resuming candle backfill from %s (existing %s data)",

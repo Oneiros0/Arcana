@@ -40,8 +40,7 @@ def granularity_seconds(granularity: str) -> int:
     """Return the bucket size in seconds for a CLI granularity label."""
     if granularity not in GRANULARITY_MAP:
         raise ValueError(
-            f"Unknown granularity {granularity!r}; "
-            f"expected one of {sorted(GRANULARITY_MAP)}"
+            f"Unknown granularity {granularity!r}; expected one of {sorted(GRANULARITY_MAP)}"
         )
     return GRANULARITY_MAP[granularity][1]
 
@@ -50,8 +49,7 @@ def granularity_api_value(granularity: str) -> str:
     """Return the Coinbase API enum value for a CLI granularity label."""
     if granularity not in GRANULARITY_MAP:
         raise ValueError(
-            f"Unknown granularity {granularity!r}; "
-            f"expected one of {sorted(GRANULARITY_MAP)}"
+            f"Unknown granularity {granularity!r}; expected one of {sorted(GRANULARITY_MAP)}"
         )
     return GRANULARITY_MAP[granularity][0]
 

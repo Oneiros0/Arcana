@@ -116,7 +116,12 @@ def db() -> None:
 @click.option("--password", default="", help="Database password.", hidden=True)
 @click.pass_context
 def db_init(
-    ctx: click.Context, host: str, port: int, database: str, user: str, password: str,
+    ctx: click.Context,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
 ) -> None:
     """Initialize the database schema."""
     arcana_cfg = ctx.obj.get("config") if ctx.obj else None
