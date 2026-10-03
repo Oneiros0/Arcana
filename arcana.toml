@@ -11,5 +11,13 @@ database = "arcana"
 user = "arcana"
 password = "arcana"
 
+# Derivatives (futures) intake — opt-in. Discover contracts with
+# `arcana list-futures`; snapshot risk metrics with `arcana metrics <id...>`.
+[derivatives]
+enabled = false
+underlyings = ["BTC", "ETH"]
+expiry_types = ["EXPIRING"]   # PERPETUAL (INTX) is frozen on this API
+metrics_interval = 300        # seconds between funding/OI/settlement snapshots
+
 # Bar construction is now handled by Sigil (separate package).
 # See sigil.toml for bar configuration.

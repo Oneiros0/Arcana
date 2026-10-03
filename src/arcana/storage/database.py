@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import psycopg
 
 from arcana.config import DatabaseConfig
-from arcana.ingestion.models import Trade
+from arcana.ingestion.models import FutureMetrics, Trade
 
 if TYPE_CHECKING:
     from arcana.models import Bar
@@ -56,6 +56,54 @@ VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (source, trade_id, timestamp) DO NOTHING;
 """
 
+# ── Futures metrics schema ─────────────────────────────────────────────────────
+#
+# Point-in-time snapshots of derivatives risk factors (funding, open interest,
+# index/settlement/mark price) polled from the product endpoint — the public API
+# exposes no historical series, so cadence = resolution. Every metric is nullable
+# because availability varies by product class (dated vs perp vs frozen INTX).
+
+FUTURES_METRICS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS futures_metrics (
+    observed_at          TIMESTAMPTZ   NOT NULL,
+    source               TEXT          NOT NULL,
+    pair                 TEXT          NOT NULL,
+    product_type         TEXT          NOT NULL DEFAULT 'FUTURE',
+    contract_expiry_type TEXT          NOT NULL DEFAULT '',
+    underlying           TEXT          NOT NULL DEFAULT '',
+    contract_expiry      TIMESTAMPTZ,
+    contract_size        NUMERIC,
+    last_price           NUMERIC,
+    volume_24h           NUMERIC,
+    open_interest        NUMERIC,
+    funding_rate         NUMERIC,
+    funding_time         TIMESTAMPTZ,
+    index_price          NUMERIC,
+    settlement_price     NUMERIC,
+    raw                  JSONB,
+    UNIQUE (source, pair, observed_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_futures_metrics_pair_ts
+    ON futures_metrics (pair, observed_at);
+CREATE INDEX IF NOT EXISTS idx_futures_metrics_underlying_ts
+    ON futures_metrics (underlying, observed_at);
+"""
+
+HYPERTABLE_FUTURES_METRICS = """
+SELECT create_hypertable('futures_metrics', 'observed_at', if_not_exists => TRUE);
+"""
+
+UPSERT_FUTURES_METRICS = """
+INSERT INTO futures_metrics (
+    observed_at, source, pair, product_type, contract_expiry_type, underlying,
+    contract_expiry, contract_size, last_price, volume_24h, open_interest,
+    funding_rate, funding_time, index_price, settlement_price, raw
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (source, pair, observed_at) DO NOTHING;
+"""
+
 # ── Per-pair-per-type bar table helpers ───────────────────────────────────────
 #
 # Each (bar_type, pair) combination gets its own table with its own
@@ -64,7 +112,10 @@ ON CONFLICT (source, trade_id, timestamp) DO NOTHING;
 # any user-defined threshold + pair is supported without migrations.
 
 _BAR_TYPE_PATTERN = re.compile(r"^[a-z0-9_.]+$")
-_PAIR_PATTERN = re.compile(r"^[A-Za-z0-9]+-[A-Za-z0-9]+$")
+# Accepts spot pairs ('ETH-USD') and multi-segment futures product ids
+# ('BIT-30OCT26-CDE', 'BTC-PERP-INTX'). Still rejects ids with no hyphen,
+# whitespace, or SQL-injection characters.
+_PAIR_PATTERN = re.compile(r"^[A-Za-z0-9]+(-[A-Za-z0-9]+)+$")
 
 
 def _bar_table_name(bar_type: str, pair: str) -> str:
@@ -89,7 +140,7 @@ def _bar_table_name(bar_type: str, pair: str) -> str:
 def _parse_bar_table_name(table_name: str) -> tuple[str, str] | None:
     """Parse a bar table name back into (bar_type, pair).
 
-    The pair is always the last two underscore-separated tokens joined
+    The pair is assumed to be the last two underscore-separated tokens joined
     by a hyphen and uppercased.  Everything between the ``bars_`` prefix
     and the pair suffix is the bar_type.
 
@@ -99,6 +150,12 @@ def _parse_bar_table_name(table_name: str) -> tuple[str, str] | None:
         'bars_volume_3000_btc_usd' -> ('volume_3000', 'BTC-USD')
 
     Returns None if the table name doesn't follow the expected format.
+
+    NOTE: this assumes a two-token pair (BASE-QUOTE) and therefore cannot
+    unambiguously recover multi-segment futures ids such as
+    'BIT-30OCT26-CDE'. Callers needing the pair for a futures table must read
+    the table's ``pair`` column instead of parsing the name — which is what
+    bar-count discovery already does.
     """
     if not table_name.startswith("bars_"):
         return None
@@ -186,8 +243,10 @@ class Database:
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(RAW_TRADES_SCHEMA)
+            cur.execute(FUTURES_METRICS_SCHEMA)
             try:
                 cur.execute(HYPERTABLE_RAW)
+                cur.execute(HYPERTABLE_FUTURES_METRICS)
                 logger.info("Hypertables created/verified")
             except psycopg.errors.UndefinedFunction:
                 logger.warning(
@@ -198,6 +257,7 @@ class Database:
                 # Re-create tables since rollback undid them
                 with conn.cursor() as cur2:
                     cur2.execute(RAW_TRADES_SCHEMA)
+                    cur2.execute(FUTURES_METRICS_SCHEMA)
         conn.commit()
         # Apply forward-only migrations for pre-existing databases.
         with conn.cursor() as cur:
@@ -350,6 +410,142 @@ class Database:
             cur.execute(query, params)
             row = cur.fetchone()
             return row[0] if row and row[0] else None
+
+    # ── Futures metrics operations ────────────────────────────────────────
+
+    def insert_future_metrics(self, metrics: list[FutureMetrics]) -> int:
+        """Batch upsert futures metric snapshots into futures_metrics.
+
+        Idempotent on (source, pair, observed_at) — safe to re-run. Returns the
+        number of new rows actually inserted.
+        """
+        import json
+
+        if not metrics:
+            return 0
+
+        conn = self.connect()
+        rows_before = self._count_future_metrics(conn)
+
+        with conn.cursor() as cur:
+            cur.executemany(
+                UPSERT_FUTURES_METRICS,
+                [
+                    (
+                        m.observed_at,
+                        m.source,
+                        m.pair,
+                        m.product_type,
+                        m.contract_expiry_type,
+                        m.underlying,
+                        m.contract_expiry,
+                        m.contract_size,
+                        m.last_price,
+                        m.volume_24h,
+                        m.open_interest,
+                        m.funding_rate,
+                        m.funding_time,
+                        m.index_price,
+                        m.settlement_price,
+                        json.dumps(m.raw) if m.raw else None,
+                    )
+                    for m in metrics
+                ],
+            )
+        conn.commit()
+
+        inserted = self._count_future_metrics(conn) - rows_before
+        logger.debug("Inserted %d new futures metrics (batch of %d)", inserted, len(metrics))
+        return inserted
+
+    def _count_future_metrics(self, conn: psycopg.Connection) -> int:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM futures_metrics")
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def get_last_metric_time(self, pair: str, source: str = "coinbase") -> datetime | None:
+        """Most recent snapshot time for a futures contract, or None."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(observed_at) FROM futures_metrics WHERE pair = %s AND source = %s",
+                (pair, source),
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+
+    def get_metric_count(self, pair: str | None = None) -> int:
+        """Total metric snapshot count, optionally filtered by pair."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            if pair:
+                cur.execute("SELECT COUNT(*) FROM futures_metrics WHERE pair = %s", (pair,))
+            else:
+                cur.execute("SELECT COUNT(*) FROM futures_metrics")
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def get_future_metrics_since(
+        self,
+        pair: str,
+        since: datetime | None = None,
+        source: str = "coinbase",
+        limit: int = 100_000,
+    ) -> list[FutureMetrics]:
+        """Fetch metric snapshots for a contract, ascending by observed_at."""
+        import json as _json
+
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cols = (
+                "observed_at, source, pair, product_type, contract_expiry_type, "
+                "underlying, contract_expiry, contract_size, last_price, volume_24h, "
+                "open_interest, funding_rate, funding_time, index_price, "
+                "settlement_price, raw"
+            )
+            if since is not None:
+                cur.execute(
+                    f"SELECT {cols} FROM futures_metrics "
+                    "WHERE pair = %s AND source = %s AND observed_at > %s "
+                    "ORDER BY observed_at ASC LIMIT %s",
+                    (pair, source, since, limit),
+                )
+            else:
+                cur.execute(
+                    f"SELECT {cols} FROM futures_metrics "
+                    "WHERE pair = %s AND source = %s "
+                    "ORDER BY observed_at ASC LIMIT %s",
+                    (pair, source, limit),
+                )
+            rows = cur.fetchall()
+
+        out: list[FutureMetrics] = []
+        for r in rows:
+            raw = r[15]
+            if raw is not None and not isinstance(raw, dict):
+                raw = _json.loads(raw)
+            out.append(
+                FutureMetrics.model_construct(
+                    observed_at=r[0],
+                    source=r[1],
+                    pair=r[2],
+                    product_type=r[3],
+                    contract_expiry_type=r[4],
+                    underlying=r[5],
+                    contract_expiry=r[6],
+                    contract_size=r[7],
+                    last_price=r[8],
+                    volume_24h=r[9],
+                    open_interest=r[10],
+                    funding_rate=r[11],
+                    funding_time=r[12],
+                    index_price=r[13],
+                    settlement_price=r[14],
+                    raw=raw,
+                )
+            )
+        return out
 
     # ── Bar operations ────────────────────────────────────────────────────
 

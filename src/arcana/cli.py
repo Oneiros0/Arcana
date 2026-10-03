@@ -14,9 +14,12 @@ from arcana.ingestion.candles import GRANULARITY_MAP
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.pipeline import (
     DAEMON_INTERVAL,
+    METRICS_INTERVAL,
     backfill_candles,
     ingest_backfill,
+    poll_metrics,
     run_daemon,
+    snapshot_metrics_once,
 )
 from arcana.storage.database import Database
 
@@ -172,12 +175,14 @@ def ingest(
 ) -> None:
     """Backfill historical trades from Coinbase.
 
-    Resumes automatically if interrupted.
+    Resumes automatically if interrupted. PAIR accepts spot pairs and futures
+    product ids alike (discover futures with 'arcana list-futures').
 
     \b
     Examples:
       arcana ingest ETH-USD --since 2025-01-01
       arcana ingest BTC-USD --since 2025-01-01 --until 2025-06-01
+      arcana ingest BIT-30OCT26-CDE --since 2026-09-01   # BTC futures
     """
     since_utc = since.replace(tzinfo=UTC)
     until_utc = until.replace(tzinfo=UTC) if until else None
@@ -193,6 +198,62 @@ def ingest(
         total = ingest_backfill(source, db_conn, pair, since=since_utc, until=until_utc)
 
     click.echo(f"Done. {total} new trades ingested.")
+
+
+# --- Futures discovery ---
+
+
+@cli.command("list-futures")
+@click.option(
+    "--underlying",
+    default="BTC,ETH",
+    help="Comma-separated underlyings to list (e.g. 'BTC,ETH'). Use 'ALL' for every underlying.",
+)
+@click.option(
+    "--expiry-type",
+    default="EXPIRING",
+    type=click.Choice(["EXPIRING", "PERPETUAL"], case_sensitive=False),
+    help="Contract expiry type. EXPIRING = live US futures; PERPETUAL = INTX (frozen).",
+)
+@click.option(
+    "--include-disabled",
+    is_flag=True,
+    default=False,
+    help="Include contracts flagged trading_disabled (e.g. retired INTX perps).",
+)
+def list_futures_cmd(underlying: str, expiry_type: str, include_disabled: bool) -> None:
+    """Discover tradeable Coinbase futures contracts (public endpoint, no key).
+
+    \b
+    Examples:
+      arcana list-futures
+      arcana list-futures --underlying BTC
+      arcana list-futures --expiry-type PERPETUAL --include-disabled
+    """
+    tokens = [u.strip().upper() for u in underlying.split(",") if u.strip()]
+    underlyings = None if "ALL" in tokens else tuple(tokens)
+
+    with CoinbaseSource() as source:
+        instruments = source.list_futures(
+            underlyings=underlyings,
+            contract_expiry_type=expiry_type.upper(),
+            include_disabled=include_disabled,
+        )
+
+    if not instruments:
+        click.echo("No matching futures contracts found.")
+        return
+
+    click.echo(f"{'PRODUCT ID':<20} {'UNDER':<6} {'EXPIRY':<12} {'SIZE':<8} NAME")
+    for inst in instruments:
+        expiry = inst.contract_expiry.date().isoformat() if inst.contract_expiry else "-"
+        size = str(inst.contract_size) if inst.contract_size is not None else "-"
+        click.echo(
+            f"{inst.product_id:<20} {inst.underlying:<6} {expiry:<12} {size:<8} {inst.display_name}"
+        )
+    click.echo(
+        f"\n{len(instruments)} contract(s). Ingest with: arcana ingest <PRODUCT ID> --since ..."
+    )
 
 
 # --- Historical candle backfill ---
@@ -250,6 +311,7 @@ def backfill_candles_cmd(
     Examples:
       arcana backfill-candles ETH-USD --since 2023-01-01 --until 2024-01-01
       arcana backfill-candles BTC-USD --since 2024-06-01 --granularity 5m
+      arcana backfill-candles BIT-30OCT26-CDE --since 2026-09-01 --granularity 1h
     """
     since_utc = since.replace(tzinfo=UTC)
     until_utc = until.replace(tzinfo=UTC) if until else None
@@ -332,6 +394,96 @@ def summon(
         raise SystemExit(1)
 
     click.echo("Daemon banished.")
+
+
+# --- Futures metrics commands ---
+
+
+@cli.command()
+@click.argument("pairs", nargs=-1, required=True)
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
+@click.pass_context
+def snapshot(
+    ctx: click.Context,
+    pairs: tuple[str, ...],
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+) -> None:
+    """Capture a one-shot futures metrics snapshot for one or more contracts.
+
+    Stores funding rate, open interest, index/settlement price and contract
+    metadata into futures_metrics (deduped on observation time).
+
+    \b
+    Examples:
+      arcana snapshot BIT-30OCT26-CDE
+      arcana snapshot BIT-30OCT26-CDE ET-30OCT26-CDE
+    """
+    arcana_cfg = ctx.obj.get("config") if ctx.obj else None
+    cfg_db = arcana_cfg.database if arcana_cfg else None
+    config = _db_config_from_options(host, port, database, user, password, cfg_db=cfg_db)
+
+    with CoinbaseSource() as source, Database(config) as db_conn:
+        db_conn.init_schema()
+        inserted = snapshot_metrics_once(source, db_conn, list(pairs))
+
+    click.echo(f"Done. {inserted} snapshot(s) stored for {len(pairs)} contract(s).")
+
+
+@cli.command()
+@click.argument("pairs", nargs=-1, required=True)
+@click.option(
+    "--interval",
+    default=METRICS_INTERVAL,
+    type=int,
+    help="Poll interval in seconds (default: 300 = 5 min).",
+)
+@click.option("--host", default="localhost", help="Database host.", hidden=True)
+@click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
+@click.option("--database", default="arcana", help="Database name.", hidden=True)
+@click.option("--user", default="arcana", help="Database user.", hidden=True)
+@click.option("--password", default="", help="Database password.", hidden=True)
+@click.pass_context
+def metrics(
+    ctx: click.Context,
+    pairs: tuple[str, ...],
+    interval: int,
+    host: str,
+    port: int,
+    database: str,
+    user: str,
+    password: str,
+) -> None:
+    """Run the futures metrics poller daemon.
+
+    Snapshots funding/open-interest/index/settlement for each contract every
+    --interval seconds. The public API has no historical series, so the poll
+    cadence sets the resolution. Press Ctrl+C to stop.
+
+    \b
+    Examples:
+      arcana metrics BIT-30OCT26-CDE ET-30OCT26-CDE
+      arcana metrics BIT-30OCT26-CDE --interval 60
+    """
+    arcana_cfg = ctx.obj.get("config") if ctx.obj else None
+    cfg_db = arcana_cfg.database if arcana_cfg else None
+    config = _db_config_from_options(host, port, database, user, password, cfg_db=cfg_db)
+
+    click.echo(f"Polling metrics for {len(pairs)} contract(s) every {interval}s...")
+    click.echo("Press Ctrl+C to stop.")
+
+    with CoinbaseSource() as source, Database(config) as db_conn:
+        db_conn.init_schema()
+        total = poll_metrics(source, db_conn, list(pairs), interval=interval)
+
+    click.echo(f"Stopped. {total} snapshot row(s) stored.")
 
 
 # --- Status command ---

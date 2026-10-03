@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from arcana.ingestion.base import DataSource
 from arcana.ingestion.candles import candle_to_trade, granularity_seconds
 from arcana.ingestion.coinbase import CANDLE_LIMIT, CoinbaseSource
-from arcana.ingestion.models import Trade
+from arcana.ingestion.models import FutureMetrics, Trade
 from arcana.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 1000  # Trades per DB commit
 DEFAULT_WINDOW = timedelta(minutes=15)
 DAEMON_INTERVAL = 15 * 60  # 15 minutes in seconds
+METRICS_INTERVAL = 5 * 60  # 5 minutes — funding is hourly, OI/index move faster
 
 
 class GracefulShutdown:
@@ -291,6 +292,76 @@ def backfill_candles(
         total_inserted,
         _format_eta(elapsed),
     )
+    return total_inserted
+
+
+def snapshot_metrics_once(
+    source: CoinbaseSource,
+    db: Database,
+    pairs: list[str],
+) -> int:
+    """Poll a single metrics snapshot for each pair and store it.
+
+    Returns the number of new rows inserted (deduped on observed_at). A failure
+    on one pair is logged and skipped so the rest still get captured.
+    """
+    snapshots: list[FutureMetrics] = []
+    for pair in pairs:
+        try:
+            snapshots.append(source.fetch_future_metrics(pair))
+        except Exception:
+            logger.exception("Failed to snapshot metrics for %s — skipping this cycle.", pair)
+    if not snapshots:
+        return 0
+    return db.insert_future_metrics(snapshots)
+
+
+def poll_metrics(
+    source: CoinbaseSource,
+    db: Database,
+    pairs: list[str],
+    interval: int = METRICS_INTERVAL,
+    max_cycles: int | None = None,
+) -> int:
+    """Run the futures-metrics poller — snapshot each contract on a timer.
+
+    The public API exposes funding/open-interest/index/settlement only as
+    current values (no history), so polling cadence sets the resolution. Runs
+    until SIGINT/SIGTERM, or until ``max_cycles`` cycles complete (for tests).
+
+    Returns the total number of snapshot rows inserted across all cycles.
+    """
+    shutdown = GracefulShutdown()
+    total_inserted = 0
+    cycle = 0
+
+    logger.info(
+        "Metrics poller starting for %d contract(s) | interval %ds | %s",
+        len(pairs),
+        interval,
+        ", ".join(pairs),
+    )
+
+    while not shutdown.should_stop:
+        cycle += 1
+        now = datetime.now(UTC)
+        try:
+            inserted = snapshot_metrics_once(source, db, pairs)
+            total_inserted += inserted
+            logger.info("Cycle %d | %s | %d snapshot(s) stored", cycle, now.isoformat(), inserted)
+        except Exception:
+            logger.exception("Metrics cycle %d failed. Will retry next cycle.", cycle)
+
+        if max_cycles is not None and cycle >= max_cycles:
+            break
+
+        # Sleep in 1s increments so shutdown is responsive.
+        for _ in range(interval):
+            if shutdown.should_stop:
+                break
+            time_mod.sleep(1)
+
+    logger.info("Metrics poller stopped after %d cycle(s): %d rows", cycle, total_inserted)
     return total_inserted
 
 

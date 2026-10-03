@@ -18,6 +18,14 @@ def _load_fixture() -> dict:
     return json.loads((FIXTURES_DIR / "sample_advanced_trade_response.json").read_text())
 
 
+def _load_future_product() -> dict:
+    return json.loads((FIXTURES_DIR / "sample_future_product.json").read_text())
+
+
+def _load_futures_products() -> dict:
+    return json.loads((FIXTURES_DIR / "sample_futures_products.json").read_text())
+
+
 def _mock_response(data: dict, status_code: int = 200) -> httpx.Response:
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = status_code
@@ -374,6 +382,178 @@ class TestFetchCandles:
                 end=datetime(2024, 1, 1, 1, tzinfo=UTC),
                 granularity="3m",
             )
+
+
+class TestListProducts:
+    def test_passes_filter_params(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response({"products": []})
+
+        source.list_products(product_type="FUTURE", contract_expiry_type="EXPIRING")
+
+        call = source._client.get.call_args
+        params = call.kwargs.get("params") or call[1].get("params")
+        assert params["product_type"] == "FUTURE"
+        assert params["contract_expiry_type"] == "EXPIRING"
+
+    def test_omits_params_when_none(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response({"products": []})
+
+        source.list_products()
+
+        call = source._client.get.call_args
+        params = call.kwargs.get("params") or call[1].get("params")
+        assert "product_type" not in params
+        assert "contract_expiry_type" not in params
+
+    def test_returns_raw_products(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_futures_products())
+
+        products = source.list_products(product_type="FUTURE")
+        assert len(products) == 8
+        assert all("product_id" in p for p in products)
+
+    def test_get_supported_pairs_unchanged(self):
+        """Regression: default product listing still filters only is_disabled."""
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(
+            {
+                "products": [
+                    {"product_id": "ETH-USD", "is_disabled": False},
+                    {"product_id": "OLD-USD", "is_disabled": True},
+                ]
+            }
+        )
+        assert source.get_supported_pairs() == ["ETH-USD"]
+
+
+class TestListFutures:
+    def test_parses_single_future_product(self):
+        source = CoinbaseSource()
+        inst = source._parse_future_instrument(_load_future_product())
+        assert inst.product_id == "BIT-30OCT26-CDE"
+        assert inst.underlying == "BTC"
+        assert inst.contract_expiry_type == "EXPIRING"
+        assert inst.contract_expiry == datetime(2026, 10, 30, 16, 0, 0, tzinfo=UTC)
+        assert inst.contract_size == Decimal("0.01")
+        assert inst.venue == "FCM"
+
+    def test_filters_to_requested_underlyings(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_futures_products())
+
+        btc = source.list_futures(underlyings=("BTC",))
+        assert btc  # non-empty
+        assert all(i.underlying == "BTC" for i in btc)
+
+    def test_btc_and_eth_both_returned(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_futures_products())
+
+        both = source.list_futures(underlyings=("BTC", "ETH"))
+        unders = {i.underlying for i in both}
+        assert unders == {"BTC", "ETH"}
+
+    def test_includes_perpetual_style_contracts(self):
+        """BIP/ETP (perpetual-style, long-dated) are included via root-unit filter."""
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_futures_products())
+
+        ids = {i.product_id for i in source.list_futures(underlyings=("BTC", "ETH"))}
+        assert "BIP-20DEC30-CDE" in ids
+        assert "ETP-20DEC30-CDE" in ids
+        assert "BIT-30OCT26-CDE" in ids
+
+    def test_underlyings_none_keeps_all(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_futures_products())
+
+        assert len(source.list_futures(underlyings=None)) == 8
+
+    def test_skips_disabled_by_default(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(
+            {
+                "products": [
+                    {
+                        "product_id": "BTC-PERP-INTX",
+                        "product_venue": "INTX",
+                        "trading_disabled": True,
+                        "future_product_details": {
+                            "contract_root_unit": "BTC",
+                            "contract_expiry_type": "PERPETUAL",
+                        },
+                    }
+                ]
+            }
+        )
+        assert source.list_futures(underlyings=("BTC",)) == []
+        assert len(source.list_futures(underlyings=("BTC",), include_disabled=True)) == 1
+
+    def test_sorted_by_underlying_then_expiry(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_futures_products())
+
+        out = source.list_futures(underlyings=("BTC", "ETH"))
+        keys = [(i.underlying, i.contract_expiry) for i in out]
+        assert keys == sorted(keys, key=lambda k: (k[0], k[1] or datetime.max.replace(tzinfo=UTC)))
+
+
+class TestFetchFutureMetrics:
+    def test_parses_dated_future_snapshot(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_future_product())
+
+        observed = datetime(2026, 10, 3, 19, 0, 0, tzinfo=UTC)
+        m = source.fetch_future_metrics("BIT-30OCT26-CDE", observed_at=observed)
+
+        assert m.pair == "BIT-30OCT26-CDE"
+        assert m.source == "coinbase"
+        assert m.observed_at == observed
+        assert m.underlying == "BTC"
+        assert m.contract_expiry_type == "EXPIRING"
+        assert m.last_price == Decimal("85170")
+        assert m.open_interest == Decimal("118023")
+        assert m.settlement_price == Decimal("84775")
+        assert m.contract_size == Decimal("0.01")
+        # Dated futures carry no funding / index on the public endpoint
+        assert m.funding_rate is None
+        assert m.index_price is None
+        # Raw details preserved for forward-compat
+        assert m.raw is not None
+        assert m.raw["contract_code"] == "BIT"
+
+    def test_observed_at_defaults_to_now(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_future_product())
+
+        before = datetime.now(UTC)
+        m = source.fetch_future_metrics("BIT-30OCT26-CDE")
+        after = datetime.now(UTC)
+        assert before <= m.observed_at <= after
+
+    def test_hits_single_product_endpoint(self):
+        source = CoinbaseSource()
+        source._client = MagicMock()
+        source._client.get.return_value = _mock_response(_load_future_product())
+
+        source.fetch_future_metrics("BIT-30OCT26-CDE")
+        endpoint = source._client.get.call_args[0][0]
+        assert endpoint.endswith("/products/BIT-30OCT26-CDE")
 
 
 class TestFetchAllCandles:

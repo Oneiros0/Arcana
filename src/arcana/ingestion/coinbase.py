@@ -25,7 +25,7 @@ from arcana.ingestion.candles import (
     granularity_seconds,
     parse_coinbase_candle,
 )
-from arcana.ingestion.models import Trade
+from arcana.ingestion.models import FutureInstrument, FutureMetrics, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -267,11 +267,136 @@ class CoinbaseSource(DataSource):
         return sorted(all_candles, key=lambda c: c.start)
 
     def get_supported_pairs(self) -> list[str]:
-        """Fetch all available trading pairs from Coinbase."""
+        """Fetch all available trading pairs from Coinbase.
+
+        Uses the default (spot) product universe — behavior unchanged. To
+        enumerate futures, use ``list_products`` / ``list_futures``.
+        """
         endpoint = f"{API_PREFIX}/products"
         response = self._request_with_retry(endpoint, {})
         products = response.json().get("products", [])
         return [p["product_id"] for p in products if not p.get("is_disabled", False)]
+
+    def list_products(
+        self,
+        product_type: str | None = None,
+        contract_expiry_type: str | None = None,
+        limit: int = 250,
+    ) -> list[dict]:
+        """Fetch raw product dicts from the public products endpoint.
+
+        Args:
+            product_type: Filter, e.g. 'FUTURE' or 'SPOT'. None uses the API
+                default (spot).
+            contract_expiry_type: Filter, e.g. 'EXPIRING' or 'PERPETUAL'.
+                Only meaningful when ``product_type='FUTURE'``.
+            limit: Max products to request in a single call.
+
+        Returns:
+            The raw product dicts exactly as returned by the API.
+        """
+        endpoint = f"{API_PREFIX}/products"
+        params: dict[str, str | int] = {"limit": limit}
+        if product_type is not None:
+            params["product_type"] = product_type
+        if contract_expiry_type is not None:
+            params["contract_expiry_type"] = contract_expiry_type
+        response = self._request_with_retry(endpoint, params)
+        return response.json().get("products", [])
+
+    def _parse_future_instrument(self, raw: dict) -> FutureInstrument:
+        """Parse a raw product dict into a FutureInstrument."""
+        fpd = raw.get("future_product_details") or {}
+        return FutureInstrument(
+            product_id=raw["product_id"],
+            source=self.name,
+            underlying=fpd.get("contract_root_unit", ""),
+            contract_expiry_type=fpd.get("contract_expiry_type", ""),
+            contract_expiry=fpd.get("contract_expiry"),
+            contract_size=fpd.get("contract_size"),
+            venue=raw.get("product_venue", ""),
+            display_name=fpd.get("display_name", ""),
+            trading_disabled=bool(raw.get("trading_disabled", False)),
+        )
+
+    def list_futures(
+        self,
+        underlyings: tuple[str, ...] | list[str] | None = ("BTC", "ETH"),
+        contract_expiry_type: str = "EXPIRING",
+        include_disabled: bool = False,
+    ) -> list[FutureInstrument]:
+        """Discover tradeable futures contracts for the given underlyings.
+
+        Filters on ``future_product_details.contract_root_unit`` so both dated
+        (e.g. BIT/ET) and perpetual-style (e.g. BIP/ETP) BTC/ETH contracts are
+        returned.
+
+        Args:
+            underlyings: Root units to keep (case-insensitive). None keeps all.
+            contract_expiry_type: 'EXPIRING' (default, the live US universe) or
+                'PERPETUAL' (INTX — currently frozen on this API).
+            include_disabled: When False (default), skip ``trading_disabled``
+                contracts.
+
+        Returns:
+            FutureInstrument records, sorted by (underlying, contract_expiry).
+        """
+        wanted = {u.upper() for u in underlyings} if underlyings is not None else None
+        products = self.list_products(
+            product_type="FUTURE", contract_expiry_type=contract_expiry_type
+        )
+        out: list[FutureInstrument] = []
+        for raw in products:
+            fpd = raw.get("future_product_details") or {}
+            root = (fpd.get("contract_root_unit") or "").upper()
+            if wanted is not None and root not in wanted:
+                continue
+            inst = self._parse_future_instrument(raw)
+            if inst.trading_disabled and not include_disabled:
+                continue
+            out.append(inst)
+        # Sort deterministically: contracts with no expiry (true perps) last.
+        out.sort(
+            key=lambda i: (
+                i.underlying,
+                i.contract_expiry or datetime.max.replace(tzinfo=UTC),
+            )
+        )
+        return out
+
+    def fetch_product(self, pair: str) -> dict:
+        """Fetch the raw product object for a single product id (public endpoint)."""
+        endpoint = f"{API_PREFIX}/products/{pair}"
+        response = self._request_with_retry(endpoint, {})
+        return response.json()
+
+    def fetch_future_metrics(self, pair: str, observed_at: datetime | None = None) -> FutureMetrics:
+        """Snapshot a futures contract's risk metrics from the product endpoint.
+
+        Captures last price, 24h volume, open interest, settlement/index price,
+        funding (where present), and contract metadata. ``observed_at`` defaults
+        to now (UTC) — the poll time, since the API gives only current values.
+        """
+        raw = self.fetch_product(pair)
+        fpd = raw.get("future_product_details") or {}
+        return FutureMetrics(
+            observed_at=observed_at or datetime.now(UTC),
+            source=self.name,
+            pair=raw.get("product_id", pair),
+            product_type=raw.get("product_type", "FUTURE"),
+            contract_expiry_type=fpd.get("contract_expiry_type", ""),
+            underlying=fpd.get("contract_root_unit", ""),
+            contract_expiry=fpd.get("contract_expiry"),
+            contract_size=fpd.get("contract_size"),
+            last_price=raw.get("price"),
+            volume_24h=raw.get("volume_24h"),
+            open_interest=fpd.get("open_interest"),
+            funding_rate=fpd.get("funding_rate"),
+            funding_time=fpd.get("funding_time"),
+            index_price=fpd.get("index_price"),
+            settlement_price=fpd.get("settlement_price"),
+            raw=fpd or None,
+        )
 
     def close(self) -> None:
         self._client.close()
