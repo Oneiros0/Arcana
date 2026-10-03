@@ -179,10 +179,55 @@ class TestMetricsCommands:
         assert result.exit_code == 0
         assert "--interval" in result.output
 
-    def test_snapshot_requires_pair(self):
+    @patch("arcana.cli.CoinbaseSource")
+    def test_snapshot_no_pairs_disabled_errors(self, mock_source_cls):
+        """With no ids and derivatives disabled (default), error before touching DB."""
+        mock_source = MagicMock()
+        mock_source_cls.return_value.__enter__ = MagicMock(return_value=mock_source)
+        mock_source_cls.return_value.__exit__ = MagicMock(return_value=False)
+
         runner = CliRunner()
-        result = runner.invoke(cli, ["snapshot"])
+        with runner.isolated_filesystem():  # no arcana.toml → defaults (disabled)
+            result = runner.invoke(cli, ["snapshot"])
+
         assert result.exit_code != 0
+        assert "enabled" in result.output.lower()
+        mock_source.list_futures.assert_not_called()
+
+    def _write_cfg(self, path, body: str) -> str:
+        cfg = path / "arcana.toml"
+        cfg.write_text(body)
+        return str(cfg)
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.CoinbaseSource")
+    @patch("arcana.cli.snapshot_metrics_once")
+    def test_snapshot_autodiscovers_from_config(
+        self, mock_snap, mock_source_cls, mock_db_cls, tmp_path
+    ):
+        mock_snap.return_value = 1
+        mock_source = MagicMock()
+        mock_source.list_futures.return_value = [
+            FutureInstrument(
+                product_id="BIT-30OCT26-CDE",
+                underlying="BTC",
+                contract_expiry_type="EXPIRING",
+            )
+        ]
+        mock_source_cls.return_value.__enter__ = MagicMock(return_value=mock_source)
+        mock_source_cls.return_value.__exit__ = MagicMock(return_value=False)
+        mock_db = MagicMock()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        cfg = self._write_cfg(tmp_path, '[derivatives]\nenabled = true\nunderlyings = ["BTC"]\n')
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--config", cfg, "snapshot"])
+
+        assert result.exit_code == 0
+        assert "Auto-discovered 1 contract(s)" in result.output
+        mock_source.list_futures.assert_called_once()
+        assert mock_snap.call_args[0][2] == ["BIT-30OCT26-CDE"]
 
     @patch("arcana.cli.Database")
     @patch("arcana.cli.CoinbaseSource")
@@ -225,3 +270,72 @@ class TestMetricsCommands:
         assert result.exit_code == 0
         assert "7 snapshot row(s) stored" in result.output
         assert mock_poll.call_args.kwargs["interval"] == 60
+
+    @patch("arcana.cli.Database")
+    @patch("arcana.cli.CoinbaseSource")
+    @patch("arcana.cli.poll_metrics")
+    def test_metrics_uses_config_interval_and_discovery(
+        self, mock_poll, mock_source_cls, mock_db_cls, tmp_path
+    ):
+        """No ids and no --interval → discover + interval both from config."""
+        mock_poll.return_value = 3
+        mock_source = MagicMock()
+        mock_source.list_futures.return_value = [
+            FutureInstrument(
+                product_id="ET-30OCT26-CDE",
+                underlying="ETH",
+                contract_expiry_type="EXPIRING",
+            )
+        ]
+        mock_source_cls.return_value.__enter__ = MagicMock(return_value=mock_source)
+        mock_source_cls.return_value.__exit__ = MagicMock(return_value=False)
+        mock_db = MagicMock()
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        cfg = tmp_path / "arcana.toml"
+        cfg.write_text(
+            '[derivatives]\nenabled = true\nunderlyings = ["ETH"]\nmetrics_interval = 120\n'
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--config", str(cfg), "metrics"])
+
+        assert result.exit_code == 0
+        assert mock_poll.call_args.kwargs["interval"] == 120
+        assert mock_poll.call_args[0][2] == ["ET-30OCT26-CDE"]
+
+
+class TestStatusMetrics:
+    @patch("arcana.cli.Database")
+    def test_status_shows_metric_snapshots(self, mock_db_cls):
+        from datetime import UTC, datetime
+
+        mock_db = MagicMock()
+        mock_db.get_trade_count.return_value = 1000
+        mock_db.get_last_timestamp.return_value = datetime(2026, 10, 3, tzinfo=UTC)
+        mock_db.get_metric_count.return_value = 42
+        mock_db.get_last_metric_time.return_value = datetime(2026, 10, 3, 19, tzinfo=UTC)
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", "BIT-30OCT26-CDE"])
+
+        assert result.exit_code == 0
+        assert "Metric snapshots: 42" in result.output
+        assert "Last snapshot:" in result.output
+
+    @patch("arcana.cli.Database")
+    def test_status_omits_metrics_when_none(self, mock_db_cls):
+        mock_db = MagicMock()
+        mock_db.get_trade_count.return_value = 5
+        mock_db.get_last_timestamp.return_value = None
+        mock_db.get_metric_count.return_value = 0
+        mock_db_cls.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_db_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", "ETH-USD"])
+
+        assert result.exit_code == 0
+        assert "Metric snapshots" not in result.output

@@ -22,15 +22,23 @@ header will call them out explicitly.
   storing point-in-time snapshots of funding rate, open interest, index price,
   settlement price, and contract metadata (every metric nullable; `raw` JSONB
   escape hatch). Upsert is idempotent on `(source, pair, observed_at)`.
-  - `arcana snapshot <id...>` — one-shot capture.
-  - `arcana metrics <id...> [--interval]` — polling daemon (default 300s);
+  - `arcana snapshot [id...]` — one-shot capture.
+  - `arcana metrics [id...] [--interval]` — polling daemon (default 300s);
     the public API has no historical series, so cadence sets resolution.
+  - With no ids, both commands auto-discover and poll the contracts in the
+    `[derivatives]` config (requires `enabled = true`); `--interval` falls back
+    to `[derivatives].metrics_interval`.
+- `arcana status` now also reports futures metric snapshot counts and the last
+  snapshot time for a contract.
 - **Models**: `FutureInstrument` (discovery) and `FutureMetrics` (snapshot) —
   empty-string API fields coerced to `None`, Decimal-safe, frozen.
 - **Client**: `CoinbaseSource.list_products`, `list_futures`, `fetch_product`,
   `fetch_future_metrics`.
 - **Config**: optional `[derivatives]` block (`enabled`, `underlyings`,
-  `expiry_types`, `metrics_interval`) with safe defaults.
+  `expiry_types`, `metrics_interval`) with safe defaults, consumed by the
+  `snapshot` / `metrics` commands for config-driven discovery.
+- **README**: derivatives quickstart, CLI reference, and `FutureMetrics`
+  data-model section.
 - [docs/derivatives-intake.md](docs/derivatives-intake.md) — API reality
   (keyless `/market/` endpoints; INTX perps frozen since 2026-10-01), design
   decisions, and the field-availability matrix by product class.

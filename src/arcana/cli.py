@@ -9,12 +9,11 @@ from datetime import UTC, datetime
 
 import click
 
-from arcana.config import ArcanaConfig, DatabaseConfig
+from arcana.config import ArcanaConfig, DatabaseConfig, DerivativesConfig
 from arcana.ingestion.candles import GRANULARITY_MAP
 from arcana.ingestion.coinbase import CoinbaseSource
 from arcana.pipeline import (
     DAEMON_INTERVAL,
-    METRICS_INTERVAL,
     backfill_candles,
     ingest_backfill,
     poll_metrics,
@@ -46,6 +45,46 @@ def _db_config_from_options(
         user=os.environ.get("ARCANA_DB_USER", cfg_user),
         password=os.environ.get("ARCANA_DB_PASSWORD", cfg_password),
     )
+
+
+def _derivatives_config(ctx: click.Context) -> DerivativesConfig:
+    """Return the [derivatives] config, or defaults when none is loaded."""
+    arcana_cfg = ctx.obj.get("config") if ctx.obj else None
+    return arcana_cfg.derivatives if arcana_cfg else DerivativesConfig()
+
+
+def _resolve_derivative_pairs(
+    ctx: click.Context, source: CoinbaseSource, pairs: tuple[str, ...]
+) -> list[str]:
+    """Resolve the contracts to act on: explicit args, else config-driven discovery.
+
+    When no pairs are given, requires ``[derivatives].enabled = true`` and
+    discovers the configured underlyings/expiry types from the live products
+    endpoint. Raises click.ClickException with actionable guidance otherwise.
+    """
+    if pairs:
+        return list(pairs)
+
+    dcfg = _derivatives_config(ctx)
+    if not dcfg.enabled:
+        raise click.ClickException(
+            "No contracts given and [derivatives].enabled is false. "
+            "Pass product ids explicitly (see 'arcana list-futures'), or set "
+            "enabled = true under [derivatives] in arcana.toml."
+        )
+    expiry = dcfg.expiry_types[0] if dcfg.expiry_types else "EXPIRING"
+    underlyings = tuple(dcfg.underlyings) if dcfg.underlyings else None
+    discovered = [
+        inst.product_id
+        for inst in source.list_futures(underlyings=underlyings, contract_expiry_type=expiry)
+    ]
+    if not discovered:
+        raise click.ClickException(
+            "No derivative contracts discovered for configured underlyings "
+            f"{dcfg.underlyings} ({expiry})."
+        )
+    click.echo(f"Auto-discovered {len(discovered)} contract(s): {', '.join(discovered)}")
+    return discovered
 
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
@@ -400,7 +439,7 @@ def summon(
 
 
 @cli.command()
-@click.argument("pairs", nargs=-1, required=True)
+@click.argument("pairs", nargs=-1, required=False)
 @click.option("--host", default="localhost", help="Database host.", hidden=True)
 @click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
 @click.option("--database", default="arcana", help="Database name.", hidden=True)
@@ -419,31 +458,35 @@ def snapshot(
     """Capture a one-shot futures metrics snapshot for one or more contracts.
 
     Stores funding rate, open interest, index/settlement price and contract
-    metadata into futures_metrics (deduped on observation time).
+    metadata into futures_metrics (deduped on observation time). With no
+    contracts given, discovers them from the [derivatives] config.
 
     \b
     Examples:
       arcana snapshot BIT-30OCT26-CDE
       arcana snapshot BIT-30OCT26-CDE ET-30OCT26-CDE
+      arcana snapshot                 # all configured [derivatives] contracts
     """
     arcana_cfg = ctx.obj.get("config") if ctx.obj else None
     cfg_db = arcana_cfg.database if arcana_cfg else None
     config = _db_config_from_options(host, port, database, user, password, cfg_db=cfg_db)
 
-    with CoinbaseSource() as source, Database(config) as db_conn:
-        db_conn.init_schema()
-        inserted = snapshot_metrics_once(source, db_conn, list(pairs))
+    with CoinbaseSource() as source:
+        resolved = _resolve_derivative_pairs(ctx, source, pairs)
+        with Database(config) as db_conn:
+            db_conn.init_schema()
+            inserted = snapshot_metrics_once(source, db_conn, resolved)
 
-    click.echo(f"Done. {inserted} snapshot(s) stored for {len(pairs)} contract(s).")
+    click.echo(f"Done. {inserted} snapshot(s) stored for {len(resolved)} contract(s).")
 
 
 @cli.command()
-@click.argument("pairs", nargs=-1, required=True)
+@click.argument("pairs", nargs=-1, required=False)
 @click.option(
     "--interval",
-    default=METRICS_INTERVAL,
+    default=None,
     type=int,
-    help="Poll interval in seconds (default: 300 = 5 min).",
+    help="Poll interval in seconds (default: [derivatives].metrics_interval or 300).",
 )
 @click.option("--host", default="localhost", help="Database host.", hidden=True)
 @click.option("--port", default=5432, type=int, help="Database port.", hidden=True)
@@ -454,7 +497,7 @@ def snapshot(
 def metrics(
     ctx: click.Context,
     pairs: tuple[str, ...],
-    interval: int,
+    interval: int | None,
     host: str,
     port: int,
     database: str,
@@ -465,23 +508,31 @@ def metrics(
 
     Snapshots funding/open-interest/index/settlement for each contract every
     --interval seconds. The public API has no historical series, so the poll
-    cadence sets the resolution. Press Ctrl+C to stop.
+    cadence sets the resolution. With no contracts given, discovers them from
+    the [derivatives] config. Press Ctrl+C to stop.
 
     \b
     Examples:
       arcana metrics BIT-30OCT26-CDE ET-30OCT26-CDE
       arcana metrics BIT-30OCT26-CDE --interval 60
+      arcana metrics                  # all configured [derivatives] contracts
     """
     arcana_cfg = ctx.obj.get("config") if ctx.obj else None
     cfg_db = arcana_cfg.database if arcana_cfg else None
     config = _db_config_from_options(host, port, database, user, password, cfg_db=cfg_db)
 
-    click.echo(f"Polling metrics for {len(pairs)} contract(s) every {interval}s...")
-    click.echo("Press Ctrl+C to stop.")
+    # Resolve interval: explicit flag > config > module default.
+    resolved_interval = (
+        interval if interval is not None else _derivatives_config(ctx).metrics_interval
+    )
 
-    with CoinbaseSource() as source, Database(config) as db_conn:
-        db_conn.init_schema()
-        total = poll_metrics(source, db_conn, list(pairs), interval=interval)
+    with CoinbaseSource() as source:
+        resolved = _resolve_derivative_pairs(ctx, source, pairs)
+        click.echo(f"Polling metrics for {len(resolved)} contract(s) every {resolved_interval}s...")
+        click.echo("Press Ctrl+C to stop.")
+        with Database(config) as db_conn:
+            db_conn.init_schema()
+            total = poll_metrics(source, db_conn, resolved, interval=resolved_interval)
 
     click.echo(f"Stopped. {total} snapshot row(s) stored.")
 
@@ -530,6 +581,15 @@ def status(
                 click.echo(f"  Data gap:     {gap}")
             else:
                 click.echo("  No trades stored yet.")
+
+            # Derivatives metrics (only shown when any snapshots exist).
+            metric_total = db_conn.get_metric_count(pair)
+            if metric_total:
+                click.echo(f"  Metric snapshots: {metric_total:,}")
+                if pair:
+                    last_metric = db_conn.get_last_metric_time(pair)
+                    if last_metric:
+                        click.echo(f"  Last snapshot:    {last_metric.isoformat()}")
     except Exception as exc:
         click.echo(f"Failed to connect: {exc}", err=True)
         raise SystemExit(1)
