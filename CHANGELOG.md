@@ -39,6 +39,9 @@ header will call them out explicitly.
   `snapshot` / `metrics` commands for config-driven discovery.
 - **README**: derivatives quickstart, CLI reference, and `FutureMetrics`
   data-model section.
+- **`scripts/derivatives_ingest.py`**: unattended, resumable runner that
+  backfills spot + futures legs in retryable day-chunks (ticks or candles) and
+  optionally starts the futures metrics poller. Multi-pair, no Sigil dependency.
 - [docs/derivatives-intake.md](docs/derivatives-intake.md) — API reality
   (keyless `/market/` endpoints; INTX perps frozen since 2026-10-01), design
   decisions, and the field-availability matrix by product class.
