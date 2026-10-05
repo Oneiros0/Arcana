@@ -10,6 +10,50 @@ header will call them out explicitly.
 
 ## [Unreleased]
 
+### Added — Derivatives (futures) price intake
+- **Futures discovery**: `arcana list-futures [--underlying BTC,ETH]
+  [--expiry-type EXPIRING|PERPETUAL] [--include-disabled]` enumerates Coinbase
+  BTC/ETH futures (dated `BIT`/`ET` and perpetual-style `BIP`/`ETP`) from the
+  public products endpoint — no API key.
+- **Futures price/trade intake**: `arcana ingest` and `arcana backfill-candles`
+  now accept futures product ids (e.g. `BIT-30OCT26-CDE`); trades and candles
+  flow through the existing `raw_trades` path unchanged.
+- **Derivatives metrics capture**: new `futures_metrics` TimescaleDB hypertable
+  storing point-in-time snapshots of funding rate, open interest, index price,
+  settlement price, and contract metadata (every metric nullable; `raw` JSONB
+  escape hatch). Upsert is idempotent on `(source, pair, observed_at)`.
+  - `arcana snapshot [id...]` — one-shot capture.
+  - `arcana metrics [id...] [--interval]` — polling daemon (default 300s);
+    the public API has no historical series, so cadence sets resolution.
+  - With no ids, both commands auto-discover and poll the contracts in the
+    `[derivatives]` config (requires `enabled = true`); `--interval` falls back
+    to `[derivatives].metrics_interval`.
+- `arcana status` now also reports futures metric snapshot counts and the last
+  snapshot time for a contract.
+- **Models**: `FutureInstrument` (discovery) and `FutureMetrics` (snapshot) —
+  empty-string API fields coerced to `None`, Decimal-safe, frozen.
+- **Client**: `CoinbaseSource.list_products`, `list_futures`, `fetch_product`,
+  `fetch_future_metrics`.
+- **Config**: optional `[derivatives]` block (`enabled`, `underlyings`,
+  `expiry_types`, `metrics_interval`) with safe defaults, consumed by the
+  `snapshot` / `metrics` commands for config-driven discovery.
+- **README**: derivatives quickstart, CLI reference, and `FutureMetrics`
+  data-model section.
+- **`scripts/derivatives_ingest.py`**: unattended, resumable runner that
+  backfills spot + futures legs in retryable day-chunks (ticks or candles) and
+  optionally starts the futures metrics poller. Multi-pair, no Sigil dependency.
+- [docs/derivatives-intake.md](docs/derivatives-intake.md) — API reality
+  (keyless `/market/` endpoints; INTX perps frozen since 2026-10-01), design
+  decisions, and the field-availability matrix by product class.
+- 58 new tests (models, discovery, metric parsing, 16-column DB mapping, poller
+  behavior, config load, CLI wiring) + two golden API fixtures.
+
+### Changed
+- `_PAIR_PATTERN` relaxed to accept multi-segment futures ids
+  (`BIT-30OCT26-CDE`, `BTC-PERP-INTX`); still rejects junk / SQL injection.
+- `init_schema()` now also creates `futures_metrics` (same TimescaleDB
+  hypertable fallback as `raw_trades`).
+
 ## [0.5.0] — 2026-04-29
 
 ### Added

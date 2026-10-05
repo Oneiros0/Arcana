@@ -1,8 +1,9 @@
 # Arcana
 
 **Quantitative trading data ingestion pipeline.** Streams raw trades from
-crypto exchanges into TimescaleDB, with backfill, gap-filling, and
-provenance-tagged historical candles.
+crypto exchanges into TimescaleDB, with backfill, gap-filling,
+provenance-tagged historical candles, and Coinbase BTC/ETH **futures** price +
+risk-metric intake.
 
 Arcana is the ingestion half of a two-part stack. Bar construction, feature
 engineering, and modeling are handled downstream by **[Sigil](https://position5.org/products/sigil)**,
@@ -187,6 +188,34 @@ The daemon detects any gap between the last stored trade and now, catches up,
 then enters the poll loop. Ctrl+C triggers a graceful shutdown with buffer
 flush.
 
+### Derivatives (BTC/ETH futures)
+
+Coinbase BTC/ETH futures trade on the same public `/market/` endpoints — no
+API key. Discover contracts, ingest their price series through the normal
+trade/candle path, and capture the risk metrics (funding, open interest,
+index/settlement price) that aren't in the trade feed.
+
+```bash
+# Discover live contracts (dated BIT/ET + perpetual-style BIP/ETP)
+arcana list-futures                      # BTC + ETH by default
+arcana list-futures --underlying BTC
+
+# Price/trade history flows through the existing commands
+arcana ingest BIT-30OCT26-CDE --since 2026-09-01
+arcana backfill-candles BIT-30OCT26-CDE --since 2026-09-01 --granularity 1h
+
+# Capture risk metrics (point-in-time snapshots → futures_metrics)
+arcana snapshot BIT-30OCT26-CDE ET-30OCT26-CDE      # one-shot
+arcana metrics BIT-30OCT26-CDE --interval 300       # polling daemon
+```
+
+The public API exposes funding / open-interest / index / settlement only as
+*current* values (no historical series), so the metrics poller stores
+timestamped snapshots — the poll cadence sets the resolution. Enable the
+`[derivatives]` config block and run `arcana snapshot` / `arcana metrics` with
+no arguments to auto-discover and capture all configured contracts. See
+[docs/derivatives-intake.md](docs/derivatives-intake.md) for the full design.
+
 ---
 
 ## CLI reference
@@ -199,8 +228,16 @@ arcana [--log-level DEBUG|INFO|WARNING|ERROR] [--config PATH]
   backfill-candles PAIR         Backfill OHLCV candles as synthetic trades
                   --since DATE  (tagged data_quality='candle_<granularity>')
   summon PAIR                   Live ingestion daemon (polls + catches gaps)
-  status [PAIR]                 Trade counts, last timestamp, data gap
+  status [PAIR]                 Trade counts, last timestamp, data gap,
+                                futures metric snapshot counts
+  list-futures                  Discover Coinbase BTC/ETH futures contracts
+  snapshot [IDS...]             One-shot futures metrics capture
+  metrics [IDS...]              Futures metrics poller daemon
 ```
+
+`PAIR` accepts spot pairs (`ETH-USD`) and futures product ids
+(`BIT-30OCT26-CDE`) alike. `snapshot` / `metrics` with no ids use the
+`[derivatives]` config.
 
 Bar construction, feature engineering, labeling, and modeling are
 **not** part of Arcana — those live in [Sigil](https://position5.org/products/sigil).
@@ -259,6 +296,33 @@ Trade
 The `raw_trades` hypertable mirrors this schema 1:1. The unique constraint
 is `(source, trade_id, timestamp)` and writes use
 `INSERT ... ON CONFLICT DO NOTHING`, making every operation safely idempotent.
+
+### FutureMetrics
+
+Futures risk-factor snapshots land in the `futures_metrics` hypertable
+(unique on `(source, pair, observed_at)`, idempotent upsert):
+
+```
+FutureMetrics
+├── observed_at          datetime    Poll time (UTC)
+├── source · pair        str         e.g. "coinbase" · "BIT-30OCT26-CDE"
+├── underlying           str         contract_root_unit, e.g. "BTC"
+├── contract_expiry_type str         "EXPIRING" | "PERPETUAL"
+├── contract_expiry      datetime?   Settlement time (None for true perps)
+├── contract_size        Decimal?    Units of underlying per contract
+├── last_price           Decimal?    Last trade price
+├── volume_24h           Decimal?
+├── open_interest        Decimal?
+├── funding_rate         Decimal?    (perp / perpetual-style only)
+├── funding_time         datetime?
+├── index_price          Decimal?    (perp / perpetual-style only)
+├── settlement_price     Decimal?    (dated futures)
+└── raw                  JSONB?      Full future_product_details (escape hatch)
+```
+
+Every metric is nullable: field availability varies by product class (dated
+futures carry settlement but no funding/index; perpetual-style carry
+funding/index). Basis is computed downstream against the spot series.
 
 ---
 
@@ -342,6 +406,7 @@ The pipeline, daemon, and storage layer remain unchanged.
 - [x] Multi-table schema with provenance tagging
 - [x] Historical candle synthesis with `data_quality` flag
 - [x] `arcana.toml` config support
+- [x] Coinbase BTC/ETH futures: discovery, price intake, risk-metric snapshots
 - [ ] TimescaleDB compression policies
 - [ ] Additional exchange sources (Binance, Kraken)
 - [ ] `arcana export` for CSV/Parquet snapshots

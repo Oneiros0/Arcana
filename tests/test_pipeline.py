@@ -9,12 +9,14 @@ import pytest
 
 from arcana.ingestion.candles import Candle
 from arcana.ingestion.coinbase import CoinbaseSource
-from arcana.ingestion.models import Trade
+from arcana.ingestion.models import FutureMetrics, Trade
 from arcana.pipeline import (
     _format_eta,
     backfill_candles,
     ingest_backfill,
+    poll_metrics,
     run_daemon,
+    snapshot_metrics_once,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -315,3 +317,101 @@ class TestBackfillCandles:
 
         assert total == 0
         source.fetch_candles.assert_not_called()
+
+
+def _make_metrics(pair: str, observed: datetime | None = None) -> FutureMetrics:
+    return FutureMetrics(
+        observed_at=observed or datetime(2026, 10, 3, 19, 0, 0, tzinfo=UTC),
+        pair=pair,
+        underlying="BTC",
+        contract_expiry_type="EXPIRING",
+        last_price=Decimal("85170"),
+        open_interest=Decimal("118023"),
+        settlement_price=Decimal("84775"),
+    )
+
+
+class TestSnapshotMetricsOnce:
+    def test_snapshots_each_pair(self):
+        source = MagicMock(spec=CoinbaseSource)
+        source.fetch_future_metrics.side_effect = lambda p: _make_metrics(p)
+        db = MagicMock()
+        db.insert_future_metrics.return_value = 2
+
+        inserted = snapshot_metrics_once(source, db, ["BIT-30OCT26-CDE", "ET-30OCT26-CDE"])
+
+        assert inserted == 2
+        assert source.fetch_future_metrics.call_count == 2
+        stored = db.insert_future_metrics.call_args[0][0]
+        assert {m.pair for m in stored} == {"BIT-30OCT26-CDE", "ET-30OCT26-CDE"}
+
+    def test_one_pair_failure_does_not_abort_others(self):
+        source = MagicMock(spec=CoinbaseSource)
+
+        def _fetch(p: str) -> FutureMetrics:
+            if p == "BAD":
+                raise RuntimeError("boom")
+            return _make_metrics(p)
+
+        source.fetch_future_metrics.side_effect = _fetch
+        db = MagicMock()
+        db.insert_future_metrics.return_value = 1
+
+        inserted = snapshot_metrics_once(source, db, ["BAD", "BIT-30OCT26-CDE"])
+
+        assert inserted == 1
+        stored = db.insert_future_metrics.call_args[0][0]
+        assert [m.pair for m in stored] == ["BIT-30OCT26-CDE"]
+
+    def test_all_failures_insert_not_called(self):
+        source = MagicMock(spec=CoinbaseSource)
+        source.fetch_future_metrics.side_effect = RuntimeError("down")
+        db = MagicMock()
+
+        inserted = snapshot_metrics_once(source, db, ["BIT-30OCT26-CDE"])
+
+        assert inserted == 0
+        db.insert_future_metrics.assert_not_called()
+
+
+class TestPollMetrics:
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
+    def test_runs_max_cycles_then_stops(self, mock_sleep, mock_shutdown):
+        mock_shutdown.return_value.should_stop = False
+        source = MagicMock(spec=CoinbaseSource)
+        source.fetch_future_metrics.side_effect = lambda p: _make_metrics(p)
+        db = MagicMock()
+        db.insert_future_metrics.return_value = 1
+
+        total = poll_metrics(source, db, ["BIT-30OCT26-CDE"], interval=60, max_cycles=3)
+
+        assert total == 3
+        assert db.insert_future_metrics.call_count == 3
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
+    def test_stops_on_shutdown_flag(self, mock_sleep, mock_shutdown):
+        # should_stop True from the start → zero cycles
+        mock_shutdown.return_value.should_stop = True
+        source = MagicMock(spec=CoinbaseSource)
+        db = MagicMock()
+
+        total = poll_metrics(source, db, ["BIT-30OCT26-CDE"], interval=60)
+
+        assert total == 0
+        source.fetch_future_metrics.assert_not_called()
+
+    @patch("arcana.pipeline.GracefulShutdown")
+    @patch("arcana.pipeline.time_mod.sleep")
+    def test_cycle_exception_is_swallowed(self, mock_sleep, mock_shutdown):
+        mock_shutdown.return_value.should_stop = False
+        source = MagicMock(spec=CoinbaseSource)
+        db = MagicMock()
+        # snapshot_metrics_once catches per-pair errors, but guard the loop too:
+        db.insert_future_metrics.side_effect = RuntimeError("db down")
+        source.fetch_future_metrics.side_effect = lambda p: _make_metrics(p)
+
+        # Should not raise despite the DB error each cycle.
+        total = poll_metrics(source, db, ["BIT-30OCT26-CDE"], interval=1, max_cycles=2)
+        assert total == 0

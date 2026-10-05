@@ -3,7 +3,7 @@
 import os
 from unittest.mock import patch
 
-from arcana.config import ArcanaConfig, PipelineConfig
+from arcana.config import ArcanaConfig, DerivativesConfig, PipelineConfig
 
 
 class TestPipelineConfig:
@@ -13,11 +13,49 @@ class TestPipelineConfig:
         assert cfg.source == "coinbase"
 
 
+class TestDerivativesConfig:
+    def test_defaults(self):
+        cfg = DerivativesConfig()
+        assert cfg.enabled is False
+        assert cfg.underlyings == ["BTC", "ETH"]
+        assert cfg.expiry_types == ["EXPIRING"]
+        assert cfg.metrics_interval == 300
+
+    def test_independent_default_lists(self):
+        """default_factory lists must not be shared between instances."""
+        a = DerivativesConfig()
+        b = DerivativesConfig()
+        a.underlyings.append("SOL")
+        assert b.underlyings == ["BTC", "ETH"]
+
+
 class TestArcanaConfig:
     def test_defaults(self):
         cfg = ArcanaConfig()
         assert cfg.database.host == "localhost"
         assert cfg.pipeline.pair == "ETH-USD"
+        # Derivatives present with safe defaults even when unconfigured
+        assert cfg.derivatives.enabled is False
+
+    def test_derivatives_from_toml(self, tmp_path):
+        toml_file = tmp_path / "deriv.toml"
+        toml_file.write_text(
+            '[derivatives]\nenabled = true\nunderlyings = ["BTC"]\nmetrics_interval = 60\n'
+        )
+        cfg = ArcanaConfig.from_toml(toml_file)
+        assert cfg.derivatives.enabled is True
+        assert cfg.derivatives.underlyings == ["BTC"]
+        assert cfg.derivatives.metrics_interval == 60
+        # Unspecified field keeps its default
+        assert cfg.derivatives.expiry_types == ["EXPIRING"]
+
+    def test_absent_derivatives_uses_defaults(self, tmp_path):
+        """Existing configs with no [derivatives] block still load."""
+        toml_file = tmp_path / "legacy.toml"
+        toml_file.write_text('[pipeline]\npair = "BTC-USD"\n')
+        cfg = ArcanaConfig.from_toml(toml_file)
+        assert cfg.derivatives.enabled is False
+        assert cfg.derivatives.underlyings == ["BTC", "ETH"]
 
     def test_from_toml(self, tmp_path):
         toml_content = """\

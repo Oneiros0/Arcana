@@ -35,11 +35,26 @@ class PipelineConfig(BaseModel):
     source: str = "coinbase"
 
 
+class DerivativesConfig(BaseModel):
+    """Derivatives (futures) intake settings.
+
+    Opt-in and additive — when absent, defaults leave behavior unchanged. The
+    metrics poller snapshots funding/open-interest/index/settlement, which the
+    public API exposes only as current values (no historical series).
+    """
+
+    enabled: bool = False
+    underlyings: list[str] = Field(default_factory=lambda: ["BTC", "ETH"])
+    expiry_types: list[str] = Field(default_factory=lambda: ["EXPIRING"])
+    metrics_interval: int = 300  # seconds between metric snapshots
+
+
 class ArcanaConfig(BaseModel):
     """Top-level configuration."""
 
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
+    derivatives: DerivativesConfig = Field(default_factory=DerivativesConfig)
 
     @classmethod
     def from_toml(cls, path: Path | str) -> ArcanaConfig:
